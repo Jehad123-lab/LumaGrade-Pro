@@ -1,0 +1,5 @@
+{
+  "name": "LumaGrade Pro",
+  "description": "A high-fidelity, industry-level color grading tool using WebGL and Three.js. Features real-time color manipulation, video timeline scrubbing, and a modular window-based interface.",
+  "requestFramePermissions": []
+}

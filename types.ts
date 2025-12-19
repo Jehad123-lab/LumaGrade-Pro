@@ -1,4 +1,5 @@
 
+
 export interface GradingParams {
   exposure: number;
   contrast: number;
@@ -12,18 +13,28 @@ export interface GradingParams {
   temperature: number;
   tint: number;
   
-  // Effects
+  // Presence (Detail)
+  texture: number; // -1 to 1 (High freq detail)
+  clarity: number; // -1 to 1 (Mid freq contrast)
+  dehaze: number;  // -1 to 1
+  
+  // Effects (Optics)
   vignette: number;
   vignetteMidpoint: number;
   vignetteRoundness: number;
   vignetteFeather: number;
+  distortion: number; // -100 to 100
+  chromaticAberration: number; // 0 to 100
 
   grain: number;
   grainSize: number;
   grainRoughness: number;
+  
+  halation: number;
 
   sharpness: number;
-  toneMapping: 'standard' | 'filmic' | 'agx' | 'soft';
+  toneMapping: 'standard' | 'filmic' | 'agx' | 'soft' | 'neutral';
+  toneStrength: number; // 0.0 to 1.0
   curves: Curves;
   colorGrading: {
     shadows: { hue: number; saturation: number; luminance: number };
@@ -33,6 +44,22 @@ export interface GradingParams {
     balance: number;  // -100 to 100 (Shift)
   };
   colorMixer: ColorMixerState;
+  
+  // Camera Calibration
+  calibration: {
+      shadowTint: number; // -100 to 100
+      red: { hue: number; saturation: number };
+      green: { hue: number; saturation: number };
+      blue: { hue: number; saturation: number };
+  };
+
+  // New Pro Features
+  lutStr: string | null; // Raw content of the .cube file
+  lutName: string | null;
+  lutIntensity: number;
+  
+  comparisonMode: 'off' | 'split' | 'toggle';
+  splitPosition: number; // 0.0 to 1.0
 }
 
 export interface ColorMixerChannel {
@@ -72,13 +99,16 @@ export interface Curves {
 }
 
 export interface MediaState {
+  id: string;
   url: string | null;
+  name: string;
   type: 'image' | 'video' | null;
   width: number;
   height: number;
   duration?: number;
   currentTime?: number;
   isPlaying?: boolean;
+  thumbnail?: string; 
 }
 
 export type WindowId = 'canvas' | 'controls' | 'timeline' | 'info' | 'shortcuts';
@@ -122,18 +152,28 @@ export const DefaultGradingParams: GradingParams = {
   temperature: 0,
   tint: 0,
   
+  // Presence
+  texture: 0,
+  clarity: 0,
+  dehaze: 0,
+
   // Effects Defaults
   vignette: 0,
   vignetteMidpoint: 0.5,
   vignetteRoundness: 0,
   vignetteFeather: 0.5,
+  distortion: 0,
+  chromaticAberration: 0,
 
   grain: 0,
   grainSize: 1.0,
   grainRoughness: 0.5,
+  
+  halation: 0,
 
   sharpness: 0,
   toneMapping: 'standard',
+  toneStrength: 1.0,
   curves: DefaultCurves,
   colorGrading: {
     shadows: { hue: 0, saturation: 0, luminance: 0 },
@@ -142,7 +182,21 @@ export const DefaultGradingParams: GradingParams = {
     blending: 50,
     balance: 0
   },
-  colorMixer: DefaultColorMixer
+  colorMixer: DefaultColorMixer,
+  
+  calibration: {
+      shadowTint: 0,
+      red: { hue: 0, saturation: 0 },
+      green: { hue: 0, saturation: 0 },
+      blue: { hue: 0, saturation: 0 }
+  },
+
+  // New
+  lutStr: null,
+  lutName: null,
+  lutIntensity: 1.0,
+  comparisonMode: 'off',
+  splitPosition: 0.5
 };
 
 export const DefaultPresets: Preset[] = [
@@ -160,6 +214,12 @@ export const DefaultPresets: Preset[] = [
                 highlights: { hue: 35, saturation: 0.3, luminance: 0.05 },
                 blending: 60
             },
+            calibration: {
+                ...DefaultGradingParams.calibration,
+                red: { hue: 20, saturation: -10 },
+                blue: { hue: -30, saturation: 20 },
+                shadowTint: -10
+            },
             toneMapping: 'filmic'
         }
     },
@@ -175,6 +235,7 @@ export const DefaultPresets: Preset[] = [
             grain: 0.5,
             grainSize: 1.5,
             grainRoughness: 0.8,
+            texture: 0.3,
             curves: {
                 ...DefaultCurves,
                 l: [{x:0,y:0, id:'0'}, {x:0.3,y:0.2,id:'1'}, {x:0.7,y:0.8,id:'2'}, {x:1,y:1,id:'3'}]
@@ -196,12 +257,40 @@ export const DefaultPresets: Preset[] = [
             vignette: 0.4,
             grain: 0.2,
             grainSize: 2.0,
+            chromaticAberration: 20,
+            distortion: -5,
             colorGrading: {
                 ...DefaultGradingParams.colorGrading,
                 shadows: { hue: 240, saturation: 0.2, luminance: 0.05 },
                 midtones: { hue: 40, saturation: 0.1, luminance: 0 },
                 highlights: { hue: 50, saturation: 0.2, luminance: -0.1 },
             }
+        }
+    },
+    {
+        id: 'preset-cyberpunk',
+        name: 'Cyberpunk',
+        params: {
+            ...DefaultGradingParams,
+            contrast: 1.3,
+            saturation: 1.4,
+            vibrance: 0.5,
+            shadows: -0.1,
+            highlights: 0.2,
+            clarity: 0.2,
+            colorGrading: {
+                ...DefaultGradingParams.colorGrading,
+                shadows: { hue: 260, saturation: 0.6, luminance: -0.1 }, // Deep Purple
+                midtones: { hue: 300, saturation: 0.2, luminance: 0 }, // Magenta
+                highlights: { hue: 180, saturation: 0.5, luminance: 0.2 }, // Cyan
+            },
+            calibration: {
+                ...DefaultGradingParams.calibration,
+                blue: { hue: -50, saturation: 50 },
+                green: { hue: 50, saturation: 0 },
+                red: { hue: -20, saturation: 20 }
+            },
+             toneMapping: 'agx'
         }
     }
 ];

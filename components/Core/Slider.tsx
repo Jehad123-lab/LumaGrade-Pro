@@ -14,6 +14,8 @@ interface SliderProps {
   tooltip?: string;
   trackGradient?: string;
   centered?: boolean; 
+  layout?: 'vertical' | 'inline';
+  className?: string;
 }
 
 export const Slider: React.FC<SliderProps> = ({ 
@@ -27,7 +29,9 @@ export const Slider: React.FC<SliderProps> = ({
   resetValue = 0, 
   tooltip,
   trackGradient,
-  centered = false
+  centered = false,
+  layout = 'vertical',
+  className = ''
 }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -49,32 +53,31 @@ export const Slider: React.FC<SliderProps> = ({
       }
   }
 
-  const content = (
-    <div 
-        className="flex flex-col gap-1.5 mb-3 group select-none"
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
-    >
-      <div className="flex justify-between items-baseline">
+  const renderLabel = () => (
+      <div className={`flex justify-between items-baseline ${layout === 'inline' ? 'w-24 shrink-0' : 'mb-1.5'}`}>
         <label className={`text-[10px] font-bold uppercase tracking-widest font-['Inter'] transition-colors duration-200 ${isHovered || isDragging ? 'text-zinc-800 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-500'}`}>
             {label}
         </label>
-        <div className="flex items-center gap-2">
-            {value !== resetValue && (
-                <button 
-                    onClick={(e) => { e.stopPropagation(); onChange(resetValue); onCommit?.(resetValue); }}
-                    className="text-[9px] uppercase tracking-wider text-zinc-400 hover:text-zinc-900 dark:text-zinc-600 dark:hover:text-zinc-300 transition-colors animate-in fade-in duration-200"
-                >
-                    Reset
-                </button>
-            )}
-            <span className={`text-[10px] font-mono tabular-nums min-w-[32px] text-right transition-colors duration-200 ${isDragging ? 'text-blue-500 dark:text-blue-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
-                {value.toFixed(step < 0.1 ? 2 : 1)}
-            </span>
-        </div>
+        {layout === 'vertical' && (
+            <div className="flex items-center gap-2">
+                {value !== resetValue && (
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); onChange(resetValue); onCommit?.(resetValue); }}
+                        className="text-[9px] uppercase tracking-wider text-zinc-400 hover:text-zinc-900 dark:text-zinc-600 dark:hover:text-zinc-300 transition-colors animate-in fade-in duration-200"
+                    >
+                        Reset
+                    </button>
+                )}
+                <span className={`text-[10px] font-mono tabular-nums min-w-[32px] text-right transition-colors duration-200 ${isDragging ? 'text-blue-500 dark:text-blue-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                    {value.toFixed(step < 0.1 ? 2 : 1)}
+                </span>
+            </div>
+        )}
       </div>
-      
-      <div className="relative w-full h-4 flex items-center cursor-ew-resize touch-none">
+  );
+
+  const renderTrack = () => (
+      <div className={`relative flex items-center cursor-ew-resize touch-none ${layout === 'inline' ? 'flex-1 h-8' : 'w-full h-4'}`}>
         <input
           type="range"
           min={min}
@@ -113,8 +116,8 @@ export const Slider: React.FC<SliderProps> = ({
             
             {/* Thumb */}
             <div 
-                className={`absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white dark:bg-[#e4e4e7] rounded-full shadow-[0_1px_3px_rgba(0,0,0,0.3)] border border-zinc-200 dark:border-none z-10 pointer-events-none transition-transform duration-150 ease-out origin-center ${isDragging || isHovered ? 'scale-100' : 'scale-0'}`}
-                style={{ left: `calc(${percentage}% - 6px)` }}
+                className={`absolute top-1/2 -translate-y-1/2 bg-white dark:bg-[#e4e4e7] rounded-full shadow-[0_1px_3px_rgba(0,0,0,0.3)] border border-zinc-200 dark:border-none z-10 pointer-events-none transition-all duration-150 ease-out origin-center ${isDragging || isHovered || layout === 'inline' ? 'scale-100' : 'scale-0'} ${layout === 'inline' ? 'w-2 h-2' : 'w-3 h-3'}`}
+                style={{ left: `calc(${percentage}% - ${layout === 'inline' ? 4 : 6}px)` }}
             >
                 {/* Active Ring */}
                  {isDragging && (
@@ -123,6 +126,21 @@ export const Slider: React.FC<SliderProps> = ({
             </div>
         </div>
       </div>
+  );
+
+  const content = (
+    <div 
+        className={`group select-none ${layout === 'inline' ? 'flex items-center gap-3 mb-1' : 'flex flex-col mb-3'} ${className}`}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+    >
+      {renderLabel()}
+      {renderTrack()}
+      {layout === 'inline' && (
+          <span className={`text-[10px] font-mono tabular-nums w-10 text-right shrink-0 transition-colors duration-200 ${isDragging ? 'text-blue-500 dark:text-blue-400' : 'text-zinc-500 dark:text-zinc-400'}`}>
+             {value > 0 && '+'}{value.toFixed(0)}
+          </span>
+      )}
     </div>
   );
 

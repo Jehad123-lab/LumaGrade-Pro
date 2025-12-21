@@ -1,5 +1,4 @@
 
-
 export interface GradingParams {
   exposure: number;
   contrast: number;
@@ -18,13 +17,45 @@ export interface GradingParams {
   clarity: number; // -1 to 1 (Mid freq contrast)
   dehaze: number;  // -1 to 1
   
+  // Detail (New)
+  detail: {
+      denoise: number; // 0-100
+      sharpening: {
+          amount: number; // 0-150
+          radius: number; // 0.5-3.0
+          detail: number; // 0-100
+          masking: number; // 0-100
+      };
+  };
+
   // Effects (Optics)
   vignette: number;
   vignetteMidpoint: number;
   vignetteRoundness: number;
   vignetteFeather: number;
   distortion: number; // -100 to 100
+  distortionCrop: boolean; // Constrain Crop
   chromaticAberration: number; // 0 to 100
+  
+  // Defringe
+  defringe: {
+      purpleAmount: number; // 0-100
+      purpleHueOffset: number; // -30 to 30
+      greenAmount: number; // 0-100
+      greenHueOffset: number; // -30 to 30
+  };
+  
+  // Transform (Geometry)
+  transform: {
+      vertical: number; // -100 to 100
+      horizontal: number; // -100 to 100
+      rotate: number; // -10 to 10
+      aspect: number; // -100 to 100
+      scale: number; // 0 to 200 (100 is default)
+      xOffset: number; // -100 to 100
+      yOffset: number; // -100 to 100
+      guides: GuideLine[]; // User drawn guides
+  };
 
   grain: number;
   grainSize: number;
@@ -32,7 +63,6 @@ export interface GradingParams {
   
   halation: number;
 
-  sharpness: number;
   toneMapping: 'standard' | 'filmic' | 'agx' | 'soft' | 'neutral';
   toneStrength: number; // 0.0 to 1.0
   curves: Curves;
@@ -44,6 +74,9 @@ export interface GradingParams {
     balance: number;  // -100 to 100 (Shift)
   };
   colorMixer: ColorMixerState;
+  
+  // Multi-Point Color System
+  pointColor: PointColorState;
   
   // Camera Calibration
   calibration: {
@@ -60,6 +93,46 @@ export interface GradingParams {
   
   comparisonMode: 'off' | 'split' | 'toggle';
   splitPosition: number; // 0.0 to 1.0
+}
+
+export interface GuideLine {
+    id: string;
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    // Computed based on angle, but can be manually set if we have a UI for it
+    type: 'vertical' | 'horizontal'; 
+}
+
+export interface PointColorData {
+    id: string;
+    active: boolean;
+    
+    // Source Color
+    srcHue: number; // 0-360
+    srcSat: number; // 0-100
+    srcLum: number; // 0-100
+    
+    // Shifts
+    hueShift: number; // -180 to 180
+    satShift: number; // -100 to 100
+    lumShift: number; // -100 to 100
+    
+    // Isolation Controls
+    hueRange: number; // 0-100
+    satRange: number; // 0-100
+    lumRange: number; // 0-100
+    
+    hueFalloff: number; // 0-100
+    satFalloff: number; // 0-100
+    lumFalloff: number; // 0-100
+}
+
+export interface PointColorState {
+    showMask: boolean; // Global mask toggle
+    activePointIndex: number; // Currently selected index
+    points: PointColorData[]; // Array of 8 points
 }
 
 export interface ColorMixerChannel {
@@ -111,6 +184,14 @@ export interface MediaState {
   thumbnail?: string; 
 }
 
+export interface SamplerPoint {
+  id: string;
+  x: number; // UV coordinate 0-1
+  y: number; // UV coordinate 0-1
+}
+
+export type ToolType = 'move' | 'sampler' | 'point-picker' | 'guided-upright';
+
 export type WindowId = 'canvas' | 'controls' | 'timeline' | 'info' | 'shortcuts';
 
 export interface WindowState {
@@ -157,13 +238,45 @@ export const DefaultGradingParams: GradingParams = {
   clarity: 0,
   dehaze: 0,
 
+  // Detail
+  detail: {
+      denoise: 0,
+      sharpening: {
+          amount: 40,
+          radius: 1.0,
+          detail: 25,
+          masking: 0
+      }
+  },
+
   // Effects Defaults
   vignette: 0,
   vignetteMidpoint: 0.5,
   vignetteRoundness: 0,
   vignetteFeather: 0.5,
   distortion: 0,
+  distortionCrop: false, 
   chromaticAberration: 0,
+  
+  // New
+  defringe: {
+      purpleAmount: 0,
+      purpleHueOffset: 0,
+      greenAmount: 0,
+      greenHueOffset: 0
+  },
+  
+  // Transform Defaults
+  transform: {
+      vertical: 0,
+      horizontal: 0,
+      rotate: 0,
+      aspect: 0,
+      scale: 100,
+      xOffset: 0,
+      yOffset: 0,
+      guides: []
+  },
 
   grain: 0,
   grainSize: 1.0,
@@ -171,7 +284,6 @@ export const DefaultGradingParams: GradingParams = {
   
   halation: 0,
 
-  sharpness: 0,
   toneMapping: 'standard',
   toneStrength: 1.0,
   curves: DefaultCurves,
@@ -183,6 +295,12 @@ export const DefaultGradingParams: GradingParams = {
     balance: 0
   },
   colorMixer: DefaultColorMixer,
+  
+  pointColor: {
+      showMask: false,
+      activePointIndex: -1,
+      points: [] 
+  },
   
   calibration: {
       shadowTint: 0,
@@ -221,76 +339,6 @@ export const DefaultPresets: Preset[] = [
                 shadowTint: -10
             },
             toneMapping: 'filmic'
-        }
-    },
-    {
-        id: 'preset-noir',
-        name: 'Noir B&W',
-        params: {
-            ...DefaultGradingParams,
-            saturation: 0,
-            contrast: 1.4,
-            exposure: 0.1,
-            vignette: 0.8,
-            grain: 0.5,
-            grainSize: 1.5,
-            grainRoughness: 0.8,
-            texture: 0.3,
-            curves: {
-                ...DefaultCurves,
-                l: [{x:0,y:0, id:'0'}, {x:0.3,y:0.2,id:'1'}, {x:0.7,y:0.8,id:'2'}, {x:1,y:1,id:'3'}]
-            },
-            toneMapping: 'agx'
-        }
-    },
-    {
-        id: 'preset-vintage',
-        name: 'Vintage Warm',
-        params: {
-            ...DefaultGradingParams,
-            temperature: 0.4,
-            tint: 0.1,
-            contrast: 0.9,
-            highlights: -0.2,
-            shadows: 0.2,
-            blacks: 0.1,
-            vignette: 0.4,
-            grain: 0.2,
-            grainSize: 2.0,
-            chromaticAberration: 20,
-            distortion: -5,
-            colorGrading: {
-                ...DefaultGradingParams.colorGrading,
-                shadows: { hue: 240, saturation: 0.2, luminance: 0.05 },
-                midtones: { hue: 40, saturation: 0.1, luminance: 0 },
-                highlights: { hue: 50, saturation: 0.2, luminance: -0.1 },
-            }
-        }
-    },
-    {
-        id: 'preset-cyberpunk',
-        name: 'Cyberpunk',
-        params: {
-            ...DefaultGradingParams,
-            contrast: 1.3,
-            saturation: 1.4,
-            vibrance: 0.5,
-            shadows: -0.1,
-            highlights: 0.2,
-            clarity: 0.2,
-            colorGrading: {
-                ...DefaultGradingParams.colorGrading,
-                shadows: { hue: 260, saturation: 0.6, luminance: -0.1 }, // Deep Purple
-                midtones: { hue: 300, saturation: 0.2, luminance: 0 }, // Magenta
-                highlights: { hue: 180, saturation: 0.5, luminance: 0.2 }, // Cyan
-            },
-            calibration: {
-                ...DefaultGradingParams.calibration,
-                blue: { hue: -50, saturation: 50 },
-                green: { hue: 50, saturation: 0 },
-                red: { hue: -20, saturation: 20 }
-            },
-             toneMapping: 'agx'
         }
     }
 ];

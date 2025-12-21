@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { DefaultGradingParams, GradingParams, WindowState, WindowId, MediaState, Preset, DefaultPresets } from './types';
+import { DefaultGradingParams, GradingParams, WindowState, WindowId, MediaState, Preset, DefaultPresets, ToolType, SamplerPoint } from './types';
 import { WindowFrame } from './components/Package/WindowFrame';
 import { WebGLCanvas } from './components/Section/WebGLCanvas';
 import { ControlPanel } from './components/Section/ControlPanel';
@@ -33,6 +33,9 @@ const MainApp: React.FC = () => {
           return DefaultPresets;
       }
   });
+
+  // Tools State
+  const [activeTool, setActiveTool] = useState<ToolType>('move');
 
   useEffect(() => {
       localStorage.setItem('luma_presets', JSON.stringify(presets));
@@ -124,7 +127,8 @@ const MainApp: React.FC = () => {
       }
   };
 
-  const updateGrading = (key: keyof GradingParams, val: number, commit = false) => {
+  // Fixed type for val to allow any value (number, object, string)
+  const updateGrading = (key: keyof GradingParams, val: any, commit = false) => {
     setGrading(prev => {
         const newState = { ...prev, [key]: val };
         if (commit) addToHistory(newState);
@@ -247,6 +251,8 @@ const MainApp: React.FC = () => {
                 onSavePreset={handleSavePreset}
                 onLoadPreset={handleLoadPreset}
                 onDeletePreset={handleDeletePreset}
+                activeTool={activeTool}
+                onToolChange={setActiveTool}
             />
 
             <WindowFrame

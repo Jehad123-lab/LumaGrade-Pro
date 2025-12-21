@@ -4,12 +4,12 @@ import { ControlPanel } from '../Section/ControlPanel';
 import { WebGLCanvas } from '../Section/WebGLCanvas';
 import { Timeline } from '../Section/Timeline';
 import { LibraryPanel } from '../Section/LibraryPanel';
-import { GradingParams, MediaState, Preset } from '../../types';
+import { GradingParams, MediaState, Preset, ToolType, SamplerPoint, PointColorData } from '../../types';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Icon } from '../Core/Icon';
 import { 
-    CornersOut, SidebarSimple, SquaresFour,
-    List, Waveform, Images
+    CornersOut, SidebarSimple, SquaresFour, Hand,
+    List, Waveform, Images, Eyedropper
 } from '@phosphor-icons/react';
 import { Tooltip } from '../Core/Tooltip';
 
@@ -30,6 +30,10 @@ interface StudioLayoutProps {
     onSavePreset: (name: string) => void;
     onLoadPreset: (preset: Preset) => void;
     onDeletePreset: (id: string) => void;
+    
+    // Tool Props
+    activeTool: ToolType;
+    onToolChange: (t: ToolType) => void;
 }
 
 type LeftSidebarMode = 'library' | 'scopes' | null;
@@ -51,6 +55,44 @@ export const StudioLayout: React.FC<StudioLayoutProps> = (props) => {
             setLeftMode(mode);
         }
     };
+    
+    // Handler for Point Color sampling (Adds a new point)
+    const handleSamplePointColor = (h: number, s: number, l: number) => {
+        const currentPoints = props.grading.pointColor.points || [];
+        
+        // Limit to 8 points
+        if (currentPoints.length >= 8) {
+            alert("Maximum 8 color points reached. Delete one to add new.");
+            return;
+        }
+
+        const newPoint: PointColorData = {
+            id: Date.now().toString(),
+            active: true,
+            srcHue: h,
+            srcSat: s,
+            srcLum: l,
+            hueShift: 0,
+            satShift: 0,
+            lumShift: 0,
+            hueRange: 20,
+            satRange: 30,
+            lumRange: 40,
+            hueFalloff: 10,
+            satFalloff: 10,
+            lumFalloff: 20
+        };
+
+        const newPointState = {
+            ...props.grading.pointColor,
+            points: [...currentPoints, newPoint],
+            activePointIndex: currentPoints.length // Select the new point
+        };
+        
+        props.onUpdateGrading('pointColor', newPointState, true);
+        // Do not switch tool back immediately to allow rapid sampling if desired,
+        // or switch back if standard behavior is preferred. Let's keep it active for "Add Mode".
+    };
 
     return (
         <div className="absolute inset-0 pt-10 flex bg-[#050505] text-zinc-200 overflow-hidden font-['Inter']">
@@ -65,10 +107,6 @@ export const StudioLayout: React.FC<StudioLayoutProps> = (props) => {
                         <Icon component={Images} size={18} weight={leftMode === 'library' ? 'fill' : 'regular'} />
                     </button>
                 </Tooltip>
-
-                {/* Scopes Icon - Currently Waveform is integrated in LibraryPanel, but conceptually could be separate. 
-                    For now, LibraryPanel handles both media and waveform check. We'll simplify.
-                */}
             </div>
 
             {/* Left Drawer (Library/Scopes) */}
@@ -111,7 +149,30 @@ export const StudioLayout: React.FC<StudioLayoutProps> = (props) => {
                          {props.media.width ? <span className="text-[10px] font-mono text-zinc-600 px-2 py-0.5 bg-white/5 rounded">{props.media.width} × {props.media.height}</span> : null}
                     </div>
 
+                    {/* Tools & Toggles */}
                     <div className="flex items-center gap-2">
+                        {/* Tool Switcher */}
+                        <div className="flex bg-white/5 rounded-md p-0.5 mr-2">
+                            <Tooltip content="Pan/Zoom">
+                                <button 
+                                    onClick={() => props.onToolChange('move')}
+                                    className={`p-1.5 rounded transition-colors ${props.activeTool === 'move' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                >
+                                    <Icon component={Hand} size={14} weight="fill" />
+                                </button>
+                            </Tooltip>
+                            {/* Point Picker Status */}
+                            {props.activeTool === 'point-picker' && (
+                                <button 
+                                    className="p-1.5 rounded bg-blue-600 text-white animate-pulse"
+                                    title="Pick Color"
+                                    onClick={() => props.onToolChange('move')}
+                                >
+                                    <Icon component={Eyedropper} size={14} weight="fill" />
+                                </button>
+                            )}
+                        </div>
+
                          <button 
                             onClick={triggerFit}
                             className="px-3 py-1.5 hover:bg-white/5 rounded text-zinc-400 hover:text-zinc-200 transition-colors text-[10px] font-bold uppercase tracking-wider" 
@@ -138,6 +199,8 @@ export const StudioLayout: React.FC<StudioLayoutProps> = (props) => {
                         seekTime={props.seekSignal}
                         onMediaLoaded={props.onMediaLoaded}
                         fitSignal={fitSignal}
+                        activeTool={props.activeTool}
+                        onSamplePointColor={handleSamplePointColor}
                     />
                 </div>
 
@@ -186,6 +249,8 @@ export const StudioLayout: React.FC<StudioLayoutProps> = (props) => {
                                 onSavePreset={props.onSavePreset}
                                 onLoadPreset={props.onLoadPreset}
                                 onDeletePreset={props.onDeletePreset}
+                                activeTool={props.activeTool}
+                                onToolChange={props.onToolChange}
                             />
                         </div>
                     </motion.div>

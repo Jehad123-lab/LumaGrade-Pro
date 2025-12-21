@@ -511,7 +511,6 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
       u.grain.value = grading.grain;
       u.grainSize.value = grading.grainSize;
       u.grainRoughness.value = grading.grainRoughness;
-      u.sharpness.value = grading.sharpness;
       u.halation.value = grading.halation || 0;
       
       let tone = 0.0;

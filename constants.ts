@@ -1,5 +1,4 @@
 
-
 export const VERTEX_SHADER = `
 varying vec2 vUv;
 void main() {
@@ -32,6 +31,12 @@ uniform float textureAmount; // Texture
 uniform float clarity; 
 uniform float dehaze;
 
+// Detail
+uniform float denoise;
+uniform float sharpenAmount;
+uniform float sharpenRadius;
+uniform float sharpenMasking;
+
 // Effects
 uniform float vignette;
 uniform float vignetteMidpoint;
@@ -44,7 +49,16 @@ uniform float grainRoughness;
 
 uniform float halation;
 
-uniform float sharpness;
+// Lens & Geometry
+// Note: distortion & distortionCrop are defined in FRAGMENT_SHADER preamble to avoid redefinition
+uniform float defringePurpleAmount;
+uniform float defringePurpleHueOffset;
+uniform float defringeGreenAmount;
+uniform float defringeGreenHueOffset;
+
+// Transform Uniform (Matrix 3x3)
+uniform mat3 uTransformMatrix;
+
 uniform float toneMapping; // 0=Standard, 1=Filmic, 2=AgX, 3=Soft, 4=Neutral
 uniform float toneStrength; // 0.0 - 1.0
 
@@ -65,6 +79,17 @@ uniform float calibShadowTint;
 // Color Mixer (8 Channels: R, O, Y, G, A, B, P, M)
 // x = Hue Shift (Degrees / 360), y = Saturation Shift (-1 to 1), z = Luminance Shift (-1 to 1)
 uniform vec3 cmOffsets[8]; 
+
+// Point Color System (Max 8 Points)
+uniform vec3 pcSources[8]; // Source Colors
+uniform vec3 pcShifts[8]; // Shift Parameters
+uniform vec3 pcRanges[8]; // Range Parameters
+uniform vec3 pcFalloffs[8]; // Falloff Parameters
+uniform float pcActives[8]; // 1.0 if active, 0.0 if not
+
+uniform int pcCount; // Number of active points (optimization, but we usually iterate 8)
+uniform float pcShowMask;
+uniform int pcMaskIndex; // Which point to visualize mask for (-1 for none or combined)
 
 // LUT
 uniform sampler3D tLut;
@@ -169,85 +194,65 @@ vec3 adjustVibrance(vec3 color, float vib) {
     return mix(vec3(luma), color, 1.0 + (vib * (1.0 - sat)));
 }
 
+// Increased sensitivity for Temp/Tint (x3)
 vec3 adjustTempTint(vec3 color, float temp, float tint) {
-    color.r *= (1.0 + temp * 0.05);
-    color.b *= (1.0 - temp * 0.05);
-    color.g *= (1.0 + tint * 0.05);
+    // Temp: -2 to 2 input. 
+    // 0.15 multiplier means max shift is +/- 30% per channel.
+    color.r *= (1.0 + temp * 0.15);
+    color.b *= (1.0 - temp * 0.15);
+    // Tint
+    color.g *= (1.0 + tint * 0.15);
     return color;
 }
 
+// Increased sensitivity for Tones
 vec3 adjustTone(vec3 color, float h, float s, float w, float b) {
     float luma = getLuminance(color);
     float hMask = smoothstep(0.5, 1.0, luma);
-    color += color * h * 0.5 * hMask;
+    color += color * h * 0.6 * hMask; // Highlights
     float sMask = 1.0 - smoothstep(0.0, 0.2, luma);
-    color += color * s * 0.3 * sMask;
-    color *= (1.0 + w * 0.5);
-    color += b * 0.05;
+    color += color * s * 0.4 * sMask; // Shadows
+    color *= (1.0 + w * 0.6); // Whites
+    color += b * 0.15; // Blacks (Lift)
     return max(vec3(0.0), color);
 }
 
+// OPERATES IN sRGB SPACE
 vec3 applyCalibration(vec3 color) {
-    // Lightroom-style Camera Calibration
-    // We approximate this by shifting hue/sat for pixels dominated by R, G, or B.
-    
     vec3 hsv = rgb2hsl(color);
     float h = hsv.x;
-    float s = hsv.y;
-    
-    // Weights for how much the pixel belongs to R, G, B primaries
-    // Red is at 0/1.0, Green at 0.33, Blue at 0.66
-    
     float distR = min(abs(h - 0.0), min(abs(h - 1.0), abs(h + 1.0)));
     float distG = abs(h - 0.333);
     float distB = abs(h - 0.666);
-    
-    // Smooth masks
     float weightR = smoothstep(0.33, 0.0, distR);
     float weightG = smoothstep(0.33, 0.0, distG);
     float weightB = smoothstep(0.33, 0.0, distB);
-    
-    // Normalize weights
     float total = weightR + weightG + weightB;
     if(total > 0.0) {
         weightR /= total;
         weightG /= total;
         weightB /= total;
     }
-    
-    // Apply Primary Shifts
-    // Hue shift is additive (degrees / 360)
     float hueShift = (calibRed.x/360.0) * weightR + (calibGreen.x/360.0) * weightG + (calibBlue.x/360.0) * weightB;
-    
-    // Sat shift is multiplicative
     float satShift = (1.0 + calibRed.y) * weightR + (1.0 + calibGreen.y) * weightG + (1.0 + calibBlue.y) * weightB;
-    
     hsv.x += hueShift;
     hsv.x = fract(hsv.x);
     hsv.y = clamp(hsv.y * satShift, 0.0, 1.0);
-    
     vec3 calibColor = hsl2rgb(hsv);
-    
-    // Shadow Tint (Green/Magenta bias in darks)
     float luma = getLuminance(calibColor);
     float shadowMask = 1.0 - smoothstep(0.0, 0.4, luma);
-    calibColor.g += calibShadowTint * 0.05 * shadowMask;
-    
+    calibColor.g += calibShadowTint * 0.1 * shadowMask;
     return calibColor;
 }
 
 vec3 applyDehaze(vec3 color, float amount) {
     if (abs(amount) < 0.01) return color;
-    
-    // Simple Dehaze approx: Boost contrast and saturation in low-contrast areas
-    // Real DCP is too heavy. We simulate it by pushing away from a "haze color"
-    vec3 hazeColor = vec3(0.8, 0.8, 0.9); // Bluish white haze
+    vec3 hazeColor = vec3(0.7, 0.7, 0.8);
+    // Stronger Dehaze
     if (amount > 0.0) {
-         // Removing haze: Push pixel away from haze color
-         return mix(color, (color - hazeColor * 0.1) / (1.0 - 0.1), amount * 0.5);
+         return mix(color, (color - hazeColor * 0.1) / (1.0 - 0.1), amount * 0.8);
     } else {
-         // Adding haze: Blend towards haze color
-         return mix(color, hazeColor, -amount * 0.5);
+         return mix(color, hazeColor, -amount * 0.8);
     }
 }
 
@@ -264,8 +269,49 @@ vec3 applyVignette(vec3 color, vec2 uv, vec2 resolution) {
     return color * (1.0 - (mask * vignette));
 }
 
+// LENS CORRECTIONS
+
+vec3 applyDefringe(vec3 color) {
+    if (defringePurpleAmount <= 0.0 && defringeGreenAmount <= 0.0) return color;
+    
+    vec3 hsl = rgb2hsl(color);
+    float h = hsl.x; // 0-1
+    float s = hsl.y;
+    
+    // Purple Defringe
+    // Standard Purple Fringing is around 280-300 deg (0.77 - 0.83).
+    // offset varies this center.
+    float pCenter = 0.8 + (defringePurpleHueOffset / 360.0);
+    float pWidth = 0.05; 
+    float pDist = abs(h - pCenter);
+    if (pDist > 0.5) pDist = 1.0 - pDist;
+    float pMask = smoothstep(pWidth + 0.05, pWidth, pDist);
+    
+    // Green Defringe
+    // Standard Green Fringing is around 120-140 deg (0.33 - 0.38).
+    float gCenter = 0.35 + (defringeGreenHueOffset / 360.0);
+    float gWidth = 0.05;
+    float gDist = abs(h - gCenter);
+    if (gDist > 0.5) gDist = 1.0 - gDist;
+    float gMask = smoothstep(gWidth + 0.05, gWidth, gDist);
+    
+    float newSat = s;
+    if (defringePurpleAmount > 0.0) {
+        float factor = 1.0 - (pMask * (defringePurpleAmount / 100.0));
+        newSat *= factor;
+    }
+    if (defringeGreenAmount > 0.0) {
+        float factor = 1.0 - (gMask * (defringeGreenAmount / 100.0));
+        newSat *= factor;
+    }
+    
+    hsl.y = newSat;
+    return hsl2rgb(hsl);
+}
+
+// OPERATES IN sRGB SPACE
 vec3 applyColorGrading(vec3 color) {
-    float luma = getLuminance(color);
+    float luma = getLuminance(color); // Perceptual Luma in sRGB
     float balance = clamp(cgBalance, -1.0, 1.0);
     float overlap = clamp(cgBlending, 0.0, 1.0) * 0.5 + 0.01; 
     float shadowThresh = 0.33 + (balance * 0.2);
@@ -283,42 +329,166 @@ vec3 applyColorGrading(vec3 color) {
     return max(vec3(0.0), tinted);
 }
 
-// Color Mixer Logic
+// OPERATES IN sRGB SPACE
 vec3 applyColorMixer(vec3 color) {
     vec3 hsl = rgb2hsl(color);
-    float h = hsl.x; // 0.0 - 1.0
-    
-    // Channel Centers (Normalized 0-1)
+    float h = hsl.x; 
     float centers[8];
-    centers[0] = 0.0;         // Red
-    centers[1] = 30.0/360.0;  // Orange
-    centers[2] = 60.0/360.0;  // Yellow
-    centers[3] = 120.0/360.0; // Green
-    centers[4] = 180.0/360.0; // Aqua
-    centers[5] = 240.0/360.0; // Blue
-    centers[6] = 270.0/360.0; // Purple
-    centers[7] = 300.0/360.0; // Magenta
-    
+    centers[0] = 0.0; centers[1] = 30.0/360.0; centers[2] = 60.0/360.0; centers[3] = 120.0/360.0;
+    centers[4] = 180.0/360.0; centers[5] = 240.0/360.0; centers[6] = 270.0/360.0; centers[7] = 300.0/360.0;
     vec3 finalAdj = vec3(0.0);
-    
     for(int i = 0; i < 8; i++) {
         float center = centers[i];
         float dist = abs(h - center);
         if (dist > 0.5) dist = 1.0 - dist; 
-        
         float width = 0.1;
         if (i == 3 || i == 4 || i == 5) width = 0.15; 
-        
         float weight = smoothstep(width, 0.0, dist);
         finalAdj += cmOffsets[i] * weight;
     }
-    
     hsl.x += finalAdj.x; 
     hsl.y = clamp(hsl.y * (1.0 + finalAdj.y), 0.0, 1.0); 
     hsl.z = clamp(hsl.z * (1.0 + finalAdj.z * 0.5), 0.0, 1.0); 
     hsl.x = fract(hsl.x);
-    
     return hsl2rgb(hsl);
+}
+
+// Multi-Point Color Logic (Operates in sRGB Space internally)
+vec4 applyMultiPointColor(vec3 srgbColor) {
+    vec3 hsl = rgb2hsl(srgbColor);
+    
+    float totalSatFactor = 1.0;
+    float totalLumFactor = 1.0;
+    float hueShiftAccum = 0.0;
+    
+    float debugMask = 0.0;
+
+    for(int i = 0; i < 8; i++) {
+        if (pcActives[i] < 0.5) continue;
+
+        vec3 src = pcSources[i]; // Normalized HSL (0-1)
+        vec3 shift = pcShifts[i]; // Normalized Shifts
+        vec3 range = pcRanges[i]; // Normalized Ranges
+        vec3 falloff = pcFalloffs[i]; // Normalized Falloff
+
+        // Hue Dist
+        float hDist = abs(hsl.x - src.x);
+        if (hDist > 0.5) hDist = 1.0 - hDist;
+        
+        // Sat/Lum Dist
+        float sDist = abs(hsl.y - src.y);
+        float lDist = abs(hsl.z - src.z);
+        
+        // Masks
+        float hMask = 1.0 - smoothstep(range.x, range.x + falloff.x + 0.001, hDist);
+        float sMask = 1.0 - smoothstep(range.y, range.y + falloff.y + 0.001, sDist);
+        float lMask = 1.0 - smoothstep(range.z, range.z + falloff.z + 0.001, lDist);
+        
+        float finalMask = hMask * sMask * lMask;
+        
+        // Accumulate Shifts
+        hueShiftAccum += shift.x * finalMask; 
+        totalSatFactor *= (1.0 + shift.y * finalMask);
+        totalLumFactor *= (1.0 + shift.z * finalMask * 0.5);
+
+        // Capture mask for visualization
+        if (i == pcMaskIndex) {
+            debugMask = finalMask;
+        }
+    }
+    
+    hsl.x += hueShiftAccum;
+    hsl.x = fract(hsl.x);
+    hsl.y = clamp(hsl.y * totalSatFactor, 0.0, 1.0);
+    hsl.z = clamp(hsl.z * totalLumFactor, 0.0, 1.0);
+    
+    return vec4(hsl2rgb(hsl), debugMask);
+}
+
+// ----------------------------------------------------------------------
+// SPATIAL EFFECTS
+// ----------------------------------------------------------------------
+
+// 1. Bilateral Denoise (Approx)
+// Samples neighbors, weights by spatial distance & color difference
+vec3 applyDenoise(vec3 color, vec2 uv, vec2 resolution, sampler2D tDiffuse) {
+    if (denoise <= 0.0) return color;
+    
+    // Constant loop bound for WebGL compatibility
+    // Using int loop (-2 to 2)
+    float sigmaSpace = 2.0;
+    float sigmaColor = 0.15; // Tolerance
+    
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    
+    vec2 px = 1.0 / resolution;
+    
+    // Unrolled-ish loop with constant bounds
+    for (int i = -2; i <= 2; i++) {
+        for (int j = -2; j <= 2; j++) {
+            vec2 offset = vec2(float(i), float(j)) * px;
+            vec3 neighbor = texture2D(tDiffuse, uv + offset).rgb;
+            
+            // Spatial Weight (Gaussian)
+            float dist2 = float(i*i + j*j);
+            float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+            
+            // Color Weight
+            vec3 diff = neighbor - color;
+            float diff2 = dot(diff, diff);
+            float wColor = exp(-diff2 / (2.0 * sigmaColor * sigmaColor));
+            
+            float weight = wSpace * wColor;
+            sum += neighbor * weight;
+            weightSum += weight;
+        }
+    }
+    
+    // Blend based on strength
+    return mix(color, sum / max(weightSum, 0.001), denoise * 0.01); // denoise is 0-100
+}
+
+// 2. Unsharp Masking with Threshold
+vec3 applySharpening(vec3 color, vec2 uv, vec2 resolution, sampler2D tDiffuse) {
+    if (sharpenAmount <= 0.0) return color;
+    
+    // Sample surrounding area (Gaussian Blur approx)
+    // Radius controls the spread
+    float radius = max(0.5, sharpenRadius);
+    vec2 off = (1.0 / resolution) * radius;
+    
+    vec3 blur = vec3(0.0);
+    blur += texture2D(tDiffuse, uv + vec2(-off.x, -off.y)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(0.0, -off.y)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(off.x, -off.y)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(-off.x, 0.0)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(0.0, 0.0)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(off.x, 0.0)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(-off.x, off.y)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(0.0, off.y)).rgb;
+    blur += texture2D(tDiffuse, uv + vec2(off.x, off.y)).rgb;
+    blur /= 9.0;
+    
+    // High Pass (Detail)
+    vec3 detail = color - blur;
+    
+    // Masking: Calculate local variance/edge magnitude
+    // Simple edge detection based on the detail magnitude
+    float edgeMag = length(detail);
+    
+    // Masking slider: 0 = Sharpen All, 100 = Sharpen Only Strong Edges
+    float threshold = sharpenMasking / 100.0 * 0.1; // Scale threshold
+    
+    // Mask factor: 1.0 if edge > threshold, 0.0 if flat
+    float mask = smoothstep(threshold, threshold + 0.02, edgeMag);
+    
+    // If masking is 0, mask factor is 1.0 everywhere.
+    if (sharpenMasking <= 0.0) mask = 1.0;
+    
+    // Apply
+    float strength = sharpenAmount / 100.0;
+    return color + detail * strength * mask;
 }
 
 vec3 SoftClip(vec3 v) {
@@ -327,17 +497,12 @@ vec3 SoftClip(vec3 v) {
 }
 
 vec3 ACESFilmic(vec3 v) {
-    v *= 0.6; // Exposure compensation for ACES
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
+    v *= 0.6; 
+    float a = 2.51; float b = 0.03; float c = 2.43; float d = 0.59; float e = 0.14;
     return clamp((v * (a * v + b)) / (v * (c * v + d) + e), 0.0, 1.0);
 }
 
 vec3 AgX(vec3 v) {
-    // Simplified AgX Approximation
     vec3 x = v;
     x = max(vec3(1e-10), x);
     x = log2(x);
@@ -365,55 +530,57 @@ vec3 applyLUT(vec3 color) {
 }
 
 vec3 calculateFinalColor(vec3 color, vec2 uv, vec2 resolution, sampler2D tCurves, sampler2D tDiffuse) {
-    // Texture (High Pass Sharpening)
-    // We do this early on the base texture before other transforms
-    if (abs(textureAmount) > 0.0 || sharpness > 0.0) {
+    // 1. Spatial Pre-Processing (Denoise & Sharpen)
+    // Applied on original texture data
+    
+    // Denoise first
+    if (denoise > 0.0) {
+        color = applyDenoise(color, uv, resolution, tDiffuse);
+    }
+    
+    // Texture/Clarity (Old)
+    if (abs(textureAmount) > 0.0) {
         vec2 px = 1.0 / resolution;
-        
-        // 5-tap kernel for basic edge detection
         vec3 n  = texture2D(tDiffuse, uv + vec2(0.0, -px.y)).rgb;
         vec3 s  = texture2D(tDiffuse, uv + vec2(0.0, px.y)).rgb;
         vec3 e  = texture2D(tDiffuse, uv + vec2(px.x, 0.0)).rgb;
         vec3 w  = texture2D(tDiffuse, uv + vec2(-px.x, 0.0)).rgb;
-        
         vec3 laplacian = n + s + e + w - 4.0 * color;
-        
-        // Texture enhances these edges
-        float totalSharp = textureAmount + sharpness;
-        color -= laplacian * totalSharp * 2.0; 
+        color -= laplacian * textureAmount * 2.0; 
+    }
+    
+    // Smart Sharpening (New)
+    if (sharpenAmount > 0.0) {
+        color = applySharpening(color, uv, resolution, tDiffuse);
     }
 
-    color = sRGBToLinear(color);
-    
-    // Calibration (Apply early to influence downstream)
-    color = applyCalibration(color);
-
-    // Basic Tone
+    // 2. Base Linear Corrections
+    color = sRGBToLinear(color); // Start Linear Pipeline
     color = adjustExposure(color, exposure);
     color = adjustContrast(color, contrast);
     color = adjustTone(color, highlights, shadows, whites, blacks);
-
-    // Dehaze / Clarity Approx
     color = applyDehaze(color, dehaze);
+    
+    // 3. Clarity (Linear approx)
     if (clarity != 0.0) {
-        // Simple local contrast approximation (Midtone contrast boost)
-        float l = getLuminance(color);
         color = mix(color, smoothstep(0.0, 1.0, color), clarity * 0.3);
     }
     
-    // Halation / Bloom
+    // 4. Halation (Linear)
     if (halation > 0.0) {
         vec3 haloAccum = vec3(0.0);
         float samples = 0.0;
         float aspect = resolution.x / resolution.y;
         float radius = halation * 0.01; 
+        
+        // Random jitter can cause derivative issues in some drivers
+        // We use a simpler pattern here to avoid "varying iteration" gradient warnings
         float jitter = random(uv) * 6.28;
         
         for(int i = 0; i < 8; i++) {
             float angle = jitter + (float(i) / 8.0) * 6.28;
             vec2 offset = vec2(cos(angle), sin(angle)) * radius;
             offset.x /= aspect; 
-            
             vec3 s = texture2D(tDiffuse, uv + offset).rgb;
             s = sRGBToLinear(s); 
             vec3 brightness = max(vec3(0.0), s - 0.5); 
@@ -425,8 +592,27 @@ vec3 calculateFinalColor(vec3 color, vec2 uv, vec2 resolution, sampler2D tCurves
         color += haloAccum * haloTint * halation * 2.0;
     }
 
+    // 5. Switch to sRGB for Creative Grading (Perceptual)
+    color = linearToSRGB(color);
+    
+    // Lens Corrections (Defringe)
+    color = applyDefringe(color);
+    
+    color = applyCalibration(color);
     color = applyColorMixer(color);
+
+    // Point Color (Returns mask in Alpha)
+    vec4 pcResult = applyMultiPointColor(color);
+    color = pcResult.rgb;
+
+    // Mask Visualization override
+    if (pcShowMask > 0.5) {
+        return vec3(pcResult.a); // Return mask
+    }
+
     color = applyColorGrading(color);
+    
+    // 6. Finishing
     color = adjustTempTint(color, temperature, tint);
     color += brightness * 0.1;
     color = adjustVibrance(color, vibrance);
@@ -435,35 +621,33 @@ vec3 calculateFinalColor(vec3 color, vec2 uv, vec2 resolution, sampler2D tCurves
 
     color = applyLUT(color);
 
-    // Tone Mapping
-    vec3 mappedColor = color;
+    // 7. Tone Mapping / ODT (Display Transform)
+    vec3 linColor = sRGBToLinear(color);
+    vec3 mappedColor = linColor;
     if (toneMapping < 0.5) {
-        mappedColor = clamp(color, 0.0, 1.0);
-        mappedColor = linearToSRGB(mappedColor);
+        mappedColor = clamp(linColor, 0.0, 1.0);
     } else if (toneMapping < 1.5) {
-        mappedColor = ACESFilmic(color);
-        mappedColor = linearToSRGB(mappedColor);
+        mappedColor = ACESFilmic(linColor);
     } else if (toneMapping < 2.5) {
-        mappedColor = AgX(color);
-        mappedColor = linearToSRGB(mappedColor); 
+        mappedColor = AgX(linColor);
     } else if (toneMapping < 3.5) {
-        mappedColor = SoftClip(color);
-        mappedColor = linearToSRGB(mappedColor);
+        mappedColor = SoftClip(linColor);
     } else {
-        mappedColor = linearToSRGB(color);
+        mappedColor = linColor; // Neutral
     }
     
-    vec3 standardColor = clamp(color, 0.0, 1.0);
-    standardColor = linearToSRGB(standardColor);
-    color = mix(standardColor, mappedColor, toneStrength);
+    color = mix(clamp(color, 0.0, 1.0), linearToSRGB(mappedColor), toneStrength);
 
+    // 8. Curves (Display Space)
     color = applyCurves(color, tCurves);
 
+    // 9. Grain (Post)
     if (grain > 0.0) {
         float noise = grainNoise(uv, resolution, grainSize, grainRoughness);
         float strength = grain * 0.1; 
         color += (noise - 0.5) * strength;
     }
+    
     return color;
 }
 `;
@@ -479,6 +663,7 @@ uniform float splitPosition; // 0.0 - 1.0
 
 // Optics
 uniform float distortion;
+uniform float distortionCrop; // 0.0 or 1.0
 uniform float chromaticAberration;
 
 varying vec2 vUv;
@@ -486,26 +671,59 @@ varying vec2 vUv;
 ${GRADING_UTILS}
 
 void main() {
-    // 1. Geometric Distortion
-    // Applied to UVs first so everything else samples the distorted space
-    vec2 uv = vUv;
+    // 0. Transform (Geometry)
+    // Using Matrix Homography
+    // Input UV (0..1) -> Local (-0.5..0.5) -> Matrix -> Perspective Divide -> UV
     
+    vec3 coord = vec3(vUv - 0.5, 1.0);
+    vec3 newCoord = uTransformMatrix * coord;
+    
+    // Avoid division by zero
+    if (abs(newCoord.z) < 0.0001) newCoord.z = 0.0001;
+    
+    vec2 uv = (newCoord.xy / newCoord.z) + 0.5;
+    
+    // Bounds check for Transform (Transparent background if out of bounds)
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    // 1. Geometric Distortion (Lens)
     if (abs(distortion) > 0.001) {
         vec2 center = uv - 0.5;
         float r2 = dot(center, center);
-        float f = 1.0 + r2 * (distortion * -0.01); // Negative to match standard barrel/pincushion feel
+        float f = 1.0 + r2 * (distortion * -0.01);
+        
+        // Dynamic Crop Logic
+        if (distortionCrop > 0.5 && distortion < 0.0) {
+             float maxR2 = 0.5;
+             float fCorner = 1.0 + maxR2 * (distortion * -0.01);
+             float zoom = 1.0 / fCorner;
+             f *= zoom;
+        }
+        
         uv = center * f + 0.5;
     }
+    
+    // Bounds check again after distortion
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
 
-    // 2. Chromatic Aberration (Split RGB samples)
+    // 2. Chromatic Aberration
     vec3 baseColor;
     if (chromaticAberration > 0.0) {
         float caAmount = chromaticAberration * 0.005;
         vec2 caOffset = (uv - 0.5) * caAmount;
+        // Basic clamp
+        vec2 uvR = clamp(uv - caOffset, 0.0, 1.0);
+        vec2 uvB = clamp(uv + caOffset, 0.0, 1.0);
         
-        float r = texture2D(tDiffuse, uv - caOffset).r;
+        float r = texture2D(tDiffuse, uvR).r;
         float g = texture2D(tDiffuse, uv).g;
-        float b = texture2D(tDiffuse, uv + caOffset).b;
+        float b = texture2D(tDiffuse, uvB).b;
         baseColor = vec3(r, g, b);
     } else {
         baseColor = texture2D(tDiffuse, uv).rgb;
@@ -514,16 +732,13 @@ void main() {
     vec4 tex = vec4(baseColor, 1.0);
     
     if (comparisonMode == 2) {
-        // Bypass
         gl_FragColor = tex;
         return;
     }
 
-    // Pass the modified UV to grading for texture/grain effects to align
     vec3 graded = calculateFinalColor(tex.rgb, uv, resolution, tCurves, tDiffuse);
     
     if (comparisonMode == 1) {
-        // Split Screen
         float lineWidth = 0.002;
         if (abs(vUv.x - splitPosition) < lineWidth) {
              gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); 

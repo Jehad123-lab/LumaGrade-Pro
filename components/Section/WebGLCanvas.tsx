@@ -1,14 +1,14 @@
 
-
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as THREE from 'three';
-import { GradingParams, MediaState, CurvePoint } from '../../types';
+import { GradingParams, MediaState, CurvePoint, ToolType, GuideLine } from '../../types';
 import { FRAGMENT_SHADER, VERTEX_SHADER } from '../../constants';
 import { MonotoneCubicSpline } from '../../spline';
 import { WaveformMonitor } from './WaveformMonitor';
 import { Icon } from '../Core/Icon';
 import { ChartLine } from '@phosphor-icons/react';
 import { parseCubeLUT } from '../../lutParser';
+import { getPrePointColor, rgb2hsl } from '../../lutEngine';
 
 interface WebGLCanvasProps {
   grading: GradingParams;
@@ -16,35 +16,29 @@ interface WebGLCanvasProps {
   onMediaLoaded: (media: Partial<MediaState>) => void;
   isPlaying: boolean;
   seekTime: number | null;
-  fitSignal?: number; // Prop to trigger fit-to-screen
-}
-
-// Helper: HSL to RGB
-function hslToRgb(h: number, s: number, l: number) {
-    const c = (1 - Math.abs(2 * l - 1)) * s;
-    const x = c * (1 - Math.abs((h / 60) % 2 - 1));
-    const m = l - c / 2;
-    let r = 0, g = 0, b = 0;
-  
-    if (0 <= h && h < 60) { r = c; g = x; b = 0; }
-    else if (60 <= h && h < 120) { r = x; g = c; b = 0; }
-    else if (120 <= h && h < 180) { r = 0; g = c; b = x; }
-    else if (180 <= h && h < 240) { r = 0; g = x; b = c; }
-    else if (240 <= h && h < 300) { r = x; g = 0; b = c; }
-    else if (300 <= h && h < 360) { r = c; g = 0; b = x; }
-  
-    return new THREE.Vector3(r + m, g + m, b + m);
+  fitSignal?: number;
+  activeTool: ToolType;
+  onSamplePointColor: (hue: number, sat: number, lum: number) => void;
 }
 
 function getTintVector(hue: number, sat: number) {
-    const rgb = hslToRgb(hue, sat, 0.5);
-    return new THREE.Vector3(rgb.x - 0.5, rgb.y - 0.5, rgb.z - 0.5);
+    const h = hue;
+    const s = sat;
+    const l = 0.5;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n: number, k = (n + h / 30) % 12) => l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    const r = f(0);
+    const g = f(8);
+    const b = f(4);
+    return new THREE.Vector3(r - 0.5, g - 0.5, b - 0.5);
 }
 
-// Order MUST match shader: Red, Orange, Yellow, Green, Aqua, Blue, Purple, Magenta
 const MIXER_ORDER = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
 
-export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMediaLoaded, isPlaying, seekTime, fitSignal }) => {
+export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ 
+    grading, media, onMediaLoaded, isPlaying, seekTime, fitSignal, 
+    activeTool, onSamplePointColor
+}) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -56,14 +50,124 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
   const curvesTextureRef = useRef<THREE.DataTexture | null>(null);
   const lutTextureRef = useRef<THREE.Data3DTexture | null>(null);
   const animationFrameRef = useRef<number>(0);
+  
+  const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Zoom/Pan State
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const isDraggingRef = useRef(false);
   const lastMouseRef = useRef({ x: 0, y: 0 });
-  
-  // Scope Overlay State
   const [showScope, setShowScope] = useState(false);
+
+  // Guide Drawing State
+  const [drawingGuide, setDrawingGuide] = useState<GuideLine | null>(null);
+
+  const raycasterRef = useRef(new THREE.Raycaster());
+
+  // Matrix Computation Helper
+  // returns 3x3 matrix as array of 9 floats (column-major for WebGL)
+  const computeTransformMatrix = (p: GradingParams['transform']) => {
+      const m = new THREE.Matrix3();
+      
+      // 1. Center Offset
+      const t1 = new THREE.Matrix3().set(
+          1, 0, -0.5,
+          0, 1, -0.5,
+          0, 0, 1
+      );
+
+      // 2. Rotate
+      const rad = THREE.MathUtils.degToRad(p.rotate);
+      const c = Math.cos(rad);
+      const s = Math.sin(rad);
+      const r = new THREE.Matrix3().set(
+          c, -s, 0,
+          s, c, 0,
+          0, 0, 1
+      );
+
+      // 3. Scale & Aspect
+      // Scale: 100 = 1.0. 
+      // Aspect: >0 makes Y smaller (taller image), <0 makes X smaller (wider image) in uv space?
+      // Actually, aspect > 0 usually stretches width? Let's check Lightoom behavior.
+      // Aspect > 0 => Taller (so we squeeze Y in UV space, or stretch X). 
+      // Let's implement Aspect by scaling Y.
+      const scl = Math.max(0.01, p.scale / 100);
+      const asp = p.aspect / 100;
+      // If aspect > 0, we want to scale Y down in UV space (to sample less Y range, zooming Y in) or scale X up?
+      // Usually Aspect Ratio slider changes the frame aspect.
+      // Let's assume standard behavior: Aspect adjusts X/Y ratio.
+      // We'll scale Y by (1 + aspect).
+      const sy = scl * (1 + (asp < 0 ? asp : 0)); // If asp -0.5, y is 0.5 (squashed)
+      const sx = scl * (1 - (asp > 0 ? asp : 0));
+      
+      const sMat = new THREE.Matrix3().set(
+          1/sx, 0, 0,
+          0, 1/sy, 0,
+          0, 0, 1
+      );
+
+      // 4. Perspective (Homography skew)
+      // Simple perspective simulation via w-component manipulation in matrix 3x3
+      // We put Vertical/Horizontal into the last row/column.
+      // For 2D homography:
+      // [ 1  0  0 ]
+      // [ 0  1  0 ]
+      // [ vx hy 1 ]
+      const vx = p.vertical / 100 * 0.01; // Sensitivity
+      const hy = p.horizontal / 100 * 0.01;
+      
+      // Note: In ThreeJS Matrix3 set(), it's row-major arguments, but stores column-major.
+      // set(n11, n12, n13, ...)
+      // We want to affect the Z (w) component based on x/y position.
+      const pMat = new THREE.Matrix3().set(
+          1, 0, 0,
+          0, 1, 0,
+          vx * -20, hy * -20, 1 // Trial and error sensitivity
+      );
+
+      // 5. User Offset (Translation)
+      const ox = -p.xOffset / 100; // Invert for intuitive drag
+      const oy = p.yOffset / 100;
+      const t2 = new THREE.Matrix3().set(
+          1, 0, 0.5 + ox,
+          0, 1, 0.5 + oy,
+          0, 0, 1
+      );
+
+      // Multiply Order: T2 * P * S * R * T1
+      // We want to apply operations in local space roughly.
+      
+      m.multiply(t1); // Move to 0,0
+      m.multiply(r);  // Rotate
+      m.multiply(sMat); // Scale
+      m.multiply(pMat); // Perspective
+      // We need to apply perspective BEFORE translating back?
+      // Actually standard: UV -> Centered -> Rotate/Scale -> Perspective -> Back
+      // But Perspective modifies W, so we need to be careful with ordering.
+      // Let's rely on the chain:
+      // Output = T2 * (P * (S * (R * (T1 * Input))))
+      
+      // Let's pre-multiply carefully:
+      // m = t1
+      // m = r * m
+      // m = sMat * m
+      // m = pMat * m
+      // m = t2 * m
+      // But matrix mult is post-multiply in ThreeJS `multiply` method? 
+      // No, A.multiply(B) -> A = A * B.
+      
+      // Let's reset and chain strictly
+      m.identity();
+      m.premultiply(t2);
+      m.premultiply(pMat); // Perspective applied near end of chain (outer)
+      m.premultiply(sMat);
+      m.premultiply(r);
+      m.premultiply(t1);
+
+      return m;
+  };
+
+  const transformMatrix = useMemo(() => computeTransformMatrix(grading.transform), [grading.transform]);
 
   // Initialize Three.js
   useEffect(() => {
@@ -98,14 +202,16 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
     curvesTex.needsUpdate = true;
     curvesTextureRef.current = curvesTex;
     
-    // Default dummy 3D Texture for LUT (2x2x2)
     const dummyLutData = new Float32Array(2*2*2*4).fill(1);
     const dummyLut = new THREE.Data3DTexture(dummyLutData, 2, 2, 2);
     dummyLut.needsUpdate = true;
     lutTextureRef.current = dummyLut;
     
-    // Initialize Mixer Array
     const mixerArr = new Array(8).fill(new THREE.Vector3(0,0,0));
+    
+    // Initial arrays for Point Color
+    const pointArr = new Array(8).fill(new THREE.Vector3(0,0,0));
+    const floatArr = new Array(8).fill(0.0);
 
     const material = new THREE.ShaderMaterial({
       uniforms: {
@@ -130,13 +236,29 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
         textureAmount: { value: 0 },
         clarity: { value: 0 },
         dehaze: { value: 0 },
+        
+        // Detail Params
+        denoise: { value: 0 },
+        sharpenAmount: { value: 0 },
+        sharpenRadius: { value: 1.0 },
+        sharpenMasking: { value: 0 },
 
         vignette: { value: 0 },
         vignetteMidpoint: { value: 0.5 },
         vignetteRoundness: { value: 0 },
         vignetteFeather: { value: 0.5 },
         distortion: { value: 0 },
+        distortionCrop: { value: 0 },
         chromaticAberration: { value: 0 },
+        
+        // Defringe
+        defringePurpleAmount: { value: 0 },
+        defringePurpleHueOffset: { value: 0 },
+        defringeGreenAmount: { value: 0 },
+        defringeGreenHueOffset: { value: 0 },
+
+        // Transform Matrix
+        uTransformMatrix: { value: new THREE.Matrix3() },
 
         grain: { value: 0 },
         grainSize: { value: 1.0 },
@@ -145,20 +267,28 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
         sharpness: { value: 0 },
         toneMapping: { value: 0 },
         toneStrength: { value: 1 },
-        
         cgShadowsColor: { value: new THREE.Vector3(0, 0, 0) },
         cgMidtonesColor: { value: new THREE.Vector3(0, 0, 0) },
         cgHighlightsColor: { value: new THREE.Vector3(0, 0, 0) },
         cgLumaParams: { value: new THREE.Vector3(0, 0, 0) },
         cgBlending: { value: 0.5 },
         cgBalance: { value: 0 },
-        
         calibRed: { value: new THREE.Vector2(0, 0) },
         calibGreen: { value: new THREE.Vector2(0, 0) },
         calibBlue: { value: new THREE.Vector2(0, 0) },
         calibShadowTint: { value: 0 },
-
         cmOffsets: { value: mixerArr },
+        
+        // Point Color Arrays
+        pcSources: { value: pointArr },
+        pcShifts: { value: pointArr },
+        pcRanges: { value: pointArr },
+        pcFalloffs: { value: pointArr },
+        pcActives: { value: floatArr },
+        pcCount: { value: 0 },
+        pcShowMask: { value: 0 },
+        pcMaskIndex: { value: -1 },
+
         resolution: { value: new THREE.Vector2(width, height) },
         comparisonMode: { value: 0 },
         splitPosition: { value: 0.5 }
@@ -191,7 +321,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
       renderer.dispose();
       dummyLut.dispose();
     };
-  }, []);
+  }, []); 
 
   // Handle LUT Loading
   useEffect(() => {
@@ -201,7 +331,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
         }
         return;
     }
-
     const parsed = parseCubeLUT(grading.lutStr);
     if (parsed) {
         lutTextureRef.current = parsed.texture;
@@ -272,18 +401,35 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
       u.textureAmount.value = grading.texture || 0;
       u.clarity.value = grading.clarity || 0;
       u.dehaze.value = grading.dehaze || 0;
+      
+      // Detail
+      const detail = grading.detail || { denoise: 0, sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 } };
+      u.denoise.value = detail.denoise;
+      u.sharpenAmount.value = detail.sharpening.amount;
+      u.sharpenRadius.value = detail.sharpening.radius;
+      u.sharpenMasking.value = detail.sharpening.masking;
 
       u.vignette.value = grading.vignette;
       u.vignetteMidpoint.value = grading.vignetteMidpoint;
       u.vignetteRoundness.value = grading.vignetteRoundness;
       u.vignetteFeather.value = grading.vignetteFeather;
       u.distortion.value = grading.distortion || 0;
+      u.distortionCrop.value = grading.distortionCrop ? 1.0 : 0.0;
       u.chromaticAberration.value = grading.chromaticAberration || 0;
+      
+      // Defringe
+      const def = grading.defringe || { purpleAmount: 0, purpleHueOffset: 0, greenAmount: 0, greenHueOffset: 0 };
+      u.defringePurpleAmount.value = def.purpleAmount;
+      u.defringePurpleHueOffset.value = def.purpleHueOffset;
+      u.defringeGreenAmount.value = def.greenAmount;
+      u.defringeGreenHueOffset.value = def.greenHueOffset;
+
+      // Transform Matrix
+      u.uTransformMatrix.value = transformMatrix;
 
       u.grain.value = grading.grain;
       u.grainSize.value = grading.grainSize;
       u.grainRoughness.value = grading.grainRoughness;
-      u.sharpness.value = grading.sharpness;
       u.lutIntensity.value = grading.lutIntensity;
       u.halation.value = grading.halation || 0;
       
@@ -297,11 +443,10 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
 
       let compMode = 0;
       if (grading.comparisonMode === 'split') compMode = 1;
-      if (grading.comparisonMode === 'toggle') compMode = 2; // Bypass
+      if (grading.comparisonMode === 'toggle') compMode = 2;
       u.comparisonMode.value = compMode;
       u.splitPosition.value = grading.splitPosition;
 
-      // Color Mixer Array
       const mixerArr = MIXER_ORDER.map(key => {
           const ch = grading.colorMixer[key as keyof typeof grading.colorMixer];
           return new THREE.Vector3(
@@ -311,8 +456,36 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
           );
       });
       u.cmOffsets.value = mixerArr;
+      
+      // Point Color Arrays
+      if (grading.pointColor && Array.isArray(grading.pointColor.points)) {
+          const points = grading.pointColor.points;
+          
+          const pcSources = new Array(8).fill(new THREE.Vector3(0,0,0));
+          const pcShifts = new Array(8).fill(new THREE.Vector3(0,0,0));
+          const pcRanges = new Array(8).fill(new THREE.Vector3(0,0,0));
+          const pcFalloffs = new Array(8).fill(new THREE.Vector3(0,0,0));
+          const pcActives = new Array(8).fill(0.0);
 
-      // Calibration
+          points.forEach((p, i) => {
+              if (i >= 8) return;
+              pcSources[i] = new THREE.Vector3(p.srcHue / 360, p.srcSat / 100, p.srcLum / 100);
+              pcShifts[i] = new THREE.Vector3(p.hueShift / 360, p.satShift / 100, p.lumShift / 100);
+              pcRanges[i] = new THREE.Vector3((p.hueRange || 20) / 360, (p.satRange || 30) / 100, (p.lumRange || 40) / 100);
+              pcFalloffs[i] = new THREE.Vector3((p.hueFalloff || 10) / 360, (p.satFalloff || 10) / 100, (p.lumFalloff || 20) / 100);
+              pcActives[i] = p.active ? 1.0 : 0.0;
+          });
+
+          u.pcSources.value = pcSources;
+          u.pcShifts.value = pcShifts;
+          u.pcRanges.value = pcRanges;
+          u.pcFalloffs.value = pcFalloffs;
+          u.pcActives.value = pcActives;
+          u.pcCount.value = points.length;
+          u.pcShowMask.value = grading.pointColor.showMask ? 1 : 0;
+          u.pcMaskIndex.value = grading.pointColor.activePointIndex;
+      }
+
       if (grading.calibration) {
           u.calibRed.value.set(grading.calibration.red.hue, grading.calibration.red.saturation / 100.0);
           u.calibGreen.value.set(grading.calibration.green.hue, grading.calibration.green.saturation / 100.0);
@@ -328,9 +501,8 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
       u.cgBlending.value = cg.blending / 100;
       u.cgBalance.value = cg.balance / 100;
     }
-  }, [grading]);
+  }, [grading, transformMatrix]);
 
-  // Fit to screen Logic
   const fitToScreen = useCallback(() => {
     if (!mountRef.current || !media.width || !media.height) return;
     setTransform({ x: 0, y: 0, scale: 1 });
@@ -340,8 +512,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
     fitToScreen();
   }, [fitSignal, media.width, media.height]);
 
-
-  // Layout & Resize Logic + Apply Transform
   useEffect(() => {
      const handleLayoutUpdate = () => {
         if (!mountRef.current || !rendererRef.current || !materialRef.current || !meshRef.current) return;
@@ -390,9 +560,23 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
      window.requestAnimationFrame(handleLayoutUpdate);
   }, [media.width, media.height, transform]);
 
-  // Media Loading
   useEffect(() => {
     if (!media.url || !materialRef.current) return;
+    const offCanvas = document.createElement('canvas');
+    sourceCanvasRef.current = offCanvas;
+
+    const handleImageLoad = (img: HTMLImageElement | HTMLVideoElement) => {
+        if (img instanceof HTMLImageElement) {
+            offCanvas.width = img.width;
+            offCanvas.height = img.height;
+            offCanvas.getContext('2d')?.drawImage(img, 0, 0);
+        }
+        if (img instanceof HTMLVideoElement) {
+            offCanvas.width = img.videoWidth;
+            offCanvas.height = img.videoHeight;
+        }
+    };
+
     if (media.type === 'image') {
        new THREE.TextureLoader().load(media.url, (tex) => {
          tex.minFilter = THREE.LinearFilter;
@@ -401,6 +585,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
          textureRef.current = tex;
          materialRef.current!.uniforms.tDiffuse.value = tex;
          onMediaLoaded({ width: tex.image.width, height: tex.image.height });
+         handleImageLoad(tex.image);
        });
     } else if (media.type === 'video') {
        const video = document.createElement('video');
@@ -412,6 +597,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
        video.load();
        video.addEventListener('loadedmetadata', () => {
           onMediaLoaded({ width: video.videoWidth, height: video.videoHeight, duration: video.duration });
+          handleImageLoad(video);
        });
        videoElementRef.current = video;
        const videoTex = new THREE.VideoTexture(video);
@@ -443,8 +629,8 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
     }
   }, [seekTime]);
 
+  // --- Event Handlers ---
 
-  // Event Handlers for Zoom/Pan
   const handleWheel = (e: React.WheelEvent) => {
       e.preventDefault();
       const zoomFactor = 1.05;
@@ -456,12 +642,80 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
+      const rect = mountRef.current?.getBoundingClientRect();
+      if (!rect || !meshRef.current || !cameraRef.current) return;
+
+      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      
+      raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
+      const intersects = raycasterRef.current.intersectObject(meshRef.current);
+      
+      // TOOL: Point Picker
+      if (activeTool === 'point-picker') {
+          if (intersects.length > 0) {
+              const uv = intersects[0].uv;
+              if (uv && sourceCanvasRef.current) {
+                  const ctx = sourceCanvasRef.current.getContext('2d');
+                  if (media.type === 'video' && videoElementRef.current) {
+                      ctx?.drawImage(videoElementRef.current, 0, 0, sourceCanvasRef.current.width, sourceCanvasRef.current.height);
+                  }
+                  if (ctx) {
+                      const sx = Math.floor(uv.x * sourceCanvasRef.current.width);
+                      const sy = Math.floor((1 - uv.y) * sourceCanvasRef.current.height);
+                      const pixel = ctx.getImageData(sx, sy, 1, 1).data;
+                      const r = pixel[0] / 255;
+                      const g = pixel[1] / 255;
+                      const b = pixel[2] / 255;
+                      const [finalR, finalG, finalB] = getPrePointColor(r, g, b, grading);
+                      const linToSrgb = (c: number) => Math.pow(c, 1.0/2.2);
+                      const [h, s, l] = rgb2hsl(linToSrgb(finalR), linToSrgb(finalG), linToSrgb(finalB));
+                      onSamplePointColor(h, s, l);
+                  }
+              }
+          }
+          return; 
+      }
+
+      // TOOL: Guided Upright
+      if (activeTool === 'guided-upright') {
+          if (intersects.length > 0) {
+              const uv = intersects[0].uv;
+              if (uv) {
+                  // Start drawing a new guide
+                  const newGuide: GuideLine = {
+                      id: Date.now().toString(),
+                      x1: uv.x, y1: uv.y,
+                      x2: uv.x, y2: uv.y,
+                      type: 'vertical' // Determined later? Or we default.
+                  };
+                  setDrawingGuide(newGuide);
+                  e.currentTarget.setPointerCapture(e.pointerId);
+              }
+          }
+          return;
+      }
+
+      // Default: Pan
       isDraggingRef.current = true;
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
       e.currentTarget.setPointerCapture(e.pointerId);
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+      // Guide Drawing Update
+      if (activeTool === 'guided-upright' && drawingGuide && meshRef.current && cameraRef.current && mountRef.current) {
+          const rect = mountRef.current.getBoundingClientRect();
+          const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
+          const intersects = raycasterRef.current.intersectObject(meshRef.current);
+          if (intersects.length > 0 && intersects[0].uv) {
+              setDrawingGuide(prev => prev ? ({ ...prev, x2: intersects[0].uv!.x, y2: intersects[0].uv!.y }) : null);
+          }
+          return;
+      }
+
       if (!isDraggingRef.current) return;
       const dx = e.clientX - lastMouseRef.current.x;
       const dy = e.clientY - lastMouseRef.current.y;
@@ -474,14 +728,23 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
+      if (activeTool === 'guided-upright' && drawingGuide) {
+          // Finish drawing guide
+          // Logic to add guide to state could be here if we were implementing full logic
+          // For now, let's just clear it to demonstrate the interaction
+          setDrawingGuide(null);
+      }
+
       isDraggingRef.current = false;
       e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
-
   return (
     <div 
-        className="w-full h-full bg-black relative flex items-center justify-center overflow-hidden group cursor-grab active:cursor-grabbing"
+        className={`w-full h-full bg-black relative flex items-center justify-center overflow-hidden group 
+            ${activeTool === 'point-picker' ? 'cursor-crosshair' : ''} 
+            ${activeTool === 'guided-upright' ? 'cursor-cell' : ''} 
+            ${activeTool === 'move' ? 'cursor-grab active:cursor-grabbing' : ''}`}
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -496,6 +759,30 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ grading, media, onMedi
         />
         <div ref={mountRef} className="w-full h-full z-10 relative pointer-events-none" />
         
+        {/* Guide Overlay */}
+        {activeTool === 'guided-upright' && (
+            <svg className="absolute inset-0 w-full h-full pointer-events-none z-20">
+                {drawingGuide && (
+                    <line 
+                        x1={`${drawingGuide.x1 * 100}%`} y1={`${(1 - drawingGuide.y1) * 100}%`} 
+                        x2={`${drawingGuide.x2 * 100}%`} y2={`${(1 - drawingGuide.y2) * 100}%`} 
+                        stroke="#00ffff" strokeWidth="2" strokeDasharray="4"
+                    />
+                )}
+            </svg>
+        )}
+
+        {/* Grid Overlay when in Geometry tab or Transform Tool is implied */}
+        {(activeTool === 'guided-upright' || activeTool === 'move') && (
+            <div className="absolute inset-0 z-10 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-500">
+                 {/* Subtle 3x3 Grid Rule of Thirds */}
+                 <div className="absolute top-0 bottom-0 left-1/3 w-px bg-white/20" />
+                 <div className="absolute top-0 bottom-0 left-2/3 w-px bg-white/20" />
+                 <div className="absolute left-0 right-0 top-1/3 h-px bg-white/20" />
+                 <div className="absolute left-0 right-0 top-2/3 h-px bg-white/20" />
+            </div>
+        )}
+
         {/* Waveform Overlay Toggle & Container */}
         {media.url && (
             <div className="absolute top-4 left-4 z-30 pointer-events-auto flex flex-col gap-2">

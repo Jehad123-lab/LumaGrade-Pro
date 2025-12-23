@@ -5,7 +5,7 @@ import { GradingParams, MediaState, CurvePoint } from '../../types';
 import { GRADING_UTILS } from '../../constants';
 import { MonotoneCubicSpline } from '../../spline';
 import { Icon } from '../Core/Icon';
-import { Clock, Target, User, Crosshair } from '@phosphor-icons/react';
+import { Clock, Target, User, Crosshair, CaretDown, Gear } from '@phosphor-icons/react';
 import { Tooltip } from '../Core/Tooltip';
 
 interface WaveformMonitorProps {
@@ -16,7 +16,10 @@ interface WaveformMonitorProps {
   transparent?: boolean;
 }
 
-type WaveMode = 'luma' | 'rgb' | 'r' | 'g' | 'b' | 'vector';
+type WaveMode = 'luma' | 'parade' | 'overlay' | 'r' | 'g' | 'b' | 'vector';
+
+// Increased resolution for professional quality
+const SCOPE_RES = 1024; 
 
 // Force high precision for texture lookups in Vertex Shader
 const WAVE_VERTEX_SHADER = `
@@ -26,7 +29,8 @@ precision highp sampler3D;
 uniform sampler2D tDiffuse;
 uniform sampler2D tCurves;
 uniform vec2 resolution;
-uniform int mode; // 0=Luma, 1=RGB, 2=R, 3=G, 4=B, 5=Vectorscope
+uniform int mode; // 0=Luma, 1=Parade, 2=R, 3=G, 4=B, 5=Vectorscope, 6=Overlay
+uniform float pointSize;
 
 attribute float vertexIndex;
 
@@ -42,39 +46,32 @@ vec3 rgb2yuv(vec3 rgb) {
 }
 
 void main() {
-    float width = 512.0;
-    float height = 512.0;
+    float width = ${SCOPE_RES}.0;
+    float height = ${SCOPE_RES}.0;
     
     float x = mod(vertexIndex, width);
     float y = floor(vertexIndex / width);
     
+    // Sample center of pixels
     vec2 uv = vec2((x + 0.5) / width, (y + 0.5) / height);
     
-    // For Waveform, we sample the center of the pixel
     vec4 tex = texture2D(tDiffuse, uv);
-    
-    // Apply grading pipeline
     vec3 color = calculateFinalColor(tex.rgb, uv, resolution, tCurves, tDiffuse);
     
     vec3 pos = vec3(0.0);
     vec3 outputColor = vec3(1.0);
-    float pointSize = 1.5;
+    float pSize = pointSize;
 
     if (mode == 5) {
         // VECTORSCOPE
-        // Convert to YUV (or similar chroma space)
         vec3 yuv = rgb2yuv(color);
-        // Map U to X, V to Y. Range usually -0.5 to 0.5. Map to -1 to 1.
         float u = yuv.y; 
         float v = yuv.z;
-        
-        // Boost spread for visibility
         pos.x = u * 2.0; 
         pos.y = v * 2.0; 
-        
-        // Color the point by its actual color
         outputColor = color;
-        pointSize = 1.0;
+        // Make vectorscope points slightly larger/softer
+        pSize = pointSize * 1.5;
         
     } else {
         // WAVEFORMS
@@ -82,49 +79,62 @@ void main() {
         
         if (mode == 0) { // Luma
             yPos = getLuminance(color);
-            outputColor = vec3(1.0);
+            outputColor = vec3(0.4, 0.9, 0.4); // Classic green phosphor
         } 
         else if (mode == 2) { // Red
             yPos = color.r;
-            outputColor = vec3(1.0, 0.3, 0.3);
+            outputColor = vec3(1.0, 0.15, 0.15);
         }
         else if (mode == 3) { // Green
             yPos = color.g;
-            outputColor = vec3(0.3, 1.0, 0.3);
+            outputColor = vec3(0.15, 1.0, 0.15);
         }
         else if (mode == 4) { // Blue
             yPos = color.b;
-            outputColor = vec3(0.3, 0.5, 1.0);
+            outputColor = vec3(0.15, 0.6, 1.0);
         }
-        else if (mode == 1) { // RGB Parade
+        else if (mode == 1 || mode == 6) { // RGB Parade (1) or Overlay (6)
             float m = mod(vertexIndex, 3.0);
-            if (m < 0.5) {
+            
+            if (m < 0.5) { // Red
                  yPos = color.r;
-                 outputColor = vec3(1.0, 0.0, 0.0);
-            } else if (m < 1.5) {
+                 outputColor = vec3(1.0, 0.1, 0.1);
+                 if (mode == 1) pos.x = (uv.x / 3.0) * 2.0 - 1.0; 
+                 else pos.x = uv.x * 2.0 - 1.0;
+            } else if (m < 1.5) { // Green
                  yPos = color.g;
-                 outputColor = vec3(0.0, 1.0, 0.0);
-            } else {
+                 outputColor = vec3(0.1, 1.0, 0.1);
+                 if (mode == 1) pos.x = (uv.x / 3.0 + 0.333) * 2.0 - 1.0;
+                 else pos.x = uv.x * 2.0 - 1.0;
+            } else { // Blue
                  yPos = color.b;
-                 outputColor = vec3(0.0, 0.0, 1.0);
+                 outputColor = vec3(0.1, 0.5, 1.0);
+                 if (mode == 1) pos.x = (uv.x / 3.0 + 0.666) * 2.0 - 1.0;
+                 else pos.x = uv.x * 2.0 - 1.0;
             }
+            
+            pos.y = yPos * 2.0 - 1.0;
         }
-        // Waveform Position Mapping
-        pos = vec3(uv.x * 2.0 - 1.0, yPos * 2.0 - 1.0, 0.0);
+        
+        if (mode != 1 && mode != 6 && mode != 5) {
+            pos = vec3(uv.x * 2.0 - 1.0, yPos * 2.0 - 1.0, 0.0);
+        }
     }
     
     vColor = outputColor;
     gl_Position = vec4(pos, 1.0);
-    gl_PointSize = pointSize;
+    gl_PointSize = pSize;
 }
 `;
 
 const WAVE_FRAGMENT_SHADER = `
 precision highp float;
 varying vec3 vColor;
+uniform float traceOpacity;
 
 void main() {
-    gl_FragColor = vec4(vColor, 0.15); // Lower opacity for better accumulation
+    // Variable opacity allows us to control "exposure" of the scope trace
+    gl_FragColor = vec4(vColor, traceOpacity); 
 }
 `;
 
@@ -159,6 +169,16 @@ const getVectorPos = (r: number, g: number, b: number) => {
     const v = 0.877 * (r - y);
     // Shader scales by 2.0
     return { x: u * 2.0, y: v * 2.0 };
+};
+
+const MODE_LABELS: Record<WaveMode, string> = {
+    luma: 'Luma',
+    parade: 'RGB Parade',
+    overlay: 'RGB Overlay',
+    r: 'Red Channel',
+    g: 'Green Channel',
+    b: 'Blue Channel',
+    vector: 'Vectorscope'
 };
 
 export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({ 
@@ -264,18 +284,25 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
     // 1. Base Graticule (Circle + Crosshair)
     // Circle
     const circleCurve = new THREE.EllipseCurve(0, 0, 0.7, 0.7, 0, 2 * Math.PI, false, 0);
-    const circlePoints = circleCurve.getPoints(64);
+    const circlePoints = circleCurve.getPoints(128);
     const circleGeo = new THREE.BufferGeometry().setFromPoints(circlePoints);
     const circleMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.2 });
     baseGroup.add(new THREE.Line(circleGeo, circleMat));
 
+    // Inner Circle
+    const innerCircleCurve = new THREE.EllipseCurve(0, 0, 0.2, 0.2, 0, 2 * Math.PI, false, 0);
+    const innerCirclePoints = innerCircleCurve.getPoints(64);
+    const innerCircleGeo = new THREE.BufferGeometry().setFromPoints(innerCirclePoints);
+    const innerCircleMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 });
+    baseGroup.add(new THREE.Line(innerCircleGeo, innerCircleMat));
+
     // Crosshair
     const crossPoints = [
-        new THREE.Vector2(-0.05, 0), new THREE.Vector2(0.05, 0),
-        new THREE.Vector2(0, -0.05), new THREE.Vector2(0, 0.05)
+        new THREE.Vector2(-0.8, 0), new THREE.Vector2(0.8, 0),
+        new THREE.Vector2(0, -0.8), new THREE.Vector2(0, 0.8)
     ];
     const crossGeo = new THREE.BufferGeometry().setFromPoints(crossPoints);
-    const crossMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.3 });
+    const crossMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.15 });
     baseGroup.add(new THREE.LineSegments(crossGeo, crossMat));
 
     // 2. Targets (75% Saturation)
@@ -291,42 +318,43 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
     targets.forEach(t => {
         const pos = getVectorPos(t.r * 0.75, t.g * 0.75, t.b * 0.75);
         const boxSize = 0.04;
+        
+        // Define square shape for LineLoop
         const boxPoints = [
-            new THREE.Vector2(pos.x - boxSize, pos.y - boxSize), new THREE.Vector2(pos.x + boxSize, pos.y - boxSize),
-            new THREE.Vector2(pos.x + boxSize, pos.y - boxSize), new THREE.Vector2(pos.x + boxSize, pos.y + boxSize),
-            new THREE.Vector2(pos.x + boxSize, pos.y + boxSize), new THREE.Vector2(pos.x - boxSize, pos.y + boxSize),
-            new THREE.Vector2(pos.x - boxSize, pos.y + boxSize), new THREE.Vector2(pos.x - boxSize, pos.y - boxSize),
+            new THREE.Vector2(pos.x - boxSize, pos.y - boxSize), 
+            new THREE.Vector2(pos.x + boxSize, pos.y - boxSize),
+            new THREE.Vector2(pos.x + boxSize, pos.y + boxSize), 
+            new THREE.Vector2(pos.x - boxSize, pos.y + boxSize)
         ];
         const boxGeo = new THREE.BufferGeometry().setFromPoints(boxPoints);
-        const boxMat = new THREE.LineBasicMaterial({ color: t.color, transparent: true, opacity: 0.6 });
-        targetsGroup.add(new THREE.LineSegments(boxGeo, boxMat));
+        const boxMat = new THREE.LineBasicMaterial({ color: t.color, transparent: true, opacity: 0.8 });
+        targetsGroup.add(new THREE.LineLoop(boxGeo, boxMat));
         
-        const dotGeo = new THREE.PlaneGeometry(0.015, 0.015);
-        const dotMat = new THREE.MeshBasicMaterial({ color: t.color, transparent: true, opacity: 0.8 });
+        // Small center dot
+        const dotGeo = new THREE.CircleGeometry(0.01, 8);
+        const dotMat = new THREE.MeshBasicMaterial({ color: t.color, transparent: true, opacity: 1.0 });
         const dot = new THREE.Mesh(dotGeo, dotMat);
         dot.position.set(pos.x, pos.y, 0);
         targetsGroup.add(dot);
     });
 
-    // 3. Skin Tone Line (I-Axis approximation)
+    // 3. Skin Tone Line (Approximation)
+    // Roughly 10:30 on clock
     const skinGeo = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector2(0, 0),
         new THREE.Vector2(-0.4, 0.6) 
     ]);
-    const skinMat = new THREE.LineDashedMaterial({ 
+    const skinMat = new THREE.LineBasicMaterial({ 
         color: 0xffccaa, 
         transparent: true, 
-        opacity: 0.5,
-        dashSize: 0.05,
-        gapSize: 0.03,
-        scale: 1
+        opacity: 0.5
     });
     const skinLine = new THREE.Line(skinGeo, skinMat);
-    skinLine.computeLineDistances();
     skinLineGroup.add(skinLine);
 
     // --- Points Setup ---
-    const res = 512;
+    // Increase points for higher resolution scope
+    const res = SCOPE_RES;
     const count = res * res;
     const geometry = new THREE.BufferGeometry();
     
@@ -371,6 +399,8 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
             lutSize: { value: 2 },
             resolution: { value: new THREE.Vector2(width, height) },
             mode: { value: 0 },
+            traceOpacity: { value: 0.05 },
+            pointSize: { value: 1.0 },
             exposure: { value: 0 }, contrast: { value: 1 },
             highlights: { value: 0 }, shadows: { value: 0 }, whites: { value: 0 }, blacks: { value: 0 },
             saturation: { value: 1 }, vibrance: { value: 0 }, brightness: { value: 0 },
@@ -541,12 +571,22 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
       u.cgBalance.value = cg.balance / 100;
 
       let m = 0;
-      if (mode === 'rgb') m = 1;
+      if (mode === 'parade') m = 1;
       if (mode === 'r') m = 2;
       if (mode === 'g') m = 3;
       if (mode === 'b') m = 4;
       if (mode === 'vector') m = 5;
+      if (mode === 'overlay') m = 6;
       u.mode.value = m;
+      
+      // Dynamic visual adjustments per mode
+      if (mode === 'vector') {
+          u.traceOpacity.value = 0.15; // Brighter for vector to see fine details
+          u.pointSize.value = 2.0;
+      } else {
+          u.traceOpacity.value = 0.05; // Dimmer for waveform to handle density
+          u.pointSize.value = 1.0;
+      }
     }
   }, [grading, mode]);
 
@@ -595,15 +635,6 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
     curvesTextureRef.current.needsUpdate = true;
   }, [grading.curves]);
 
-  const Tab = ({ id, label }: { id: WaveMode, label: string }) => (
-      <button 
-        onClick={() => setMode(id)}
-        className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded transition-colors ${mode === id ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
-      >
-        {label}
-      </button>
-  );
-
   const getPersistenceLabel = () => {
     switch(persistenceMode) {
         case 1: return "Short Trail";
@@ -618,68 +649,99 @@ export const WaveformMonitor: React.FC<WaveformMonitorProps> = ({
   };
 
   return (
-    <div className={className || "w-full h-48 bg-[#09090b] border-b border-white/5 flex flex-col relative shrink-0"}>
-        <div className="absolute top-2 left-2 flex items-center gap-2 z-10">
-            <div className="flex gap-1">
-                <Tab id="luma" label="L" />
-                <Tab id="rgb" label="RGB" />
-                <Tab id="vector" label="Vec" />
+    <div className={`${className || "w-full h-48 bg-[#09090b] border-b border-white/5"} relative flex flex-col shrink-0 overflow-hidden`}>
+        {/* Floating Controls Bar */}
+        <div className="absolute top-2 left-2 right-2 flex items-center justify-between z-10 pointer-events-none">
+            <div className="flex items-center gap-2 pointer-events-auto">
+                {/* Scope Mode Selector */}
+                <div className="relative group">
+                    <select
+                        value={mode}
+                        onChange={(e) => setMode(e.target.value as WaveMode)}
+                        className="appearance-none bg-black/40 backdrop-blur-md text-zinc-300 text-[10px] font-bold uppercase tracking-wider py-1 pl-2.5 pr-8 rounded-md border border-white/10 hover:border-white/20 focus:outline-none focus:ring-1 focus:ring-white/20 cursor-pointer transition-all hover:bg-black/60 shadow-lg"
+                    >
+                        {Object.entries(MODE_LABELS).map(([k, v]) => (
+                            <option key={k} value={k} className="bg-zinc-900 text-zinc-300">{v}</option>
+                        ))}
+                    </select>
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
+                        <Icon component={CaretDown} size={10} weight="bold" />
+                    </div>
+                </div>
             </div>
-            
-            <div className="w-px h-3 bg-white/10 mx-1" />
-            
-            <Tooltip content={getPersistenceLabel()}>
-                <button
-                    onClick={handlePersistenceToggle}
-                    className={`w-5 h-5 flex items-center justify-center rounded transition-colors ${persistenceMode > 0 ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}
-                >
-                    <Icon component={Clock} size={12} weight={persistenceMode > 0 ? 'fill' : 'bold'} />
-                    {persistenceMode > 0 && (
-                         <span className="absolute bottom-[2px] right-[2px] w-1 h-1 bg-white rounded-full"></span>
-                    )}
-                </button>
-            </Tooltip>
 
-            {mode === 'vector' && (
-                <>
-                    <div className="w-px h-3 bg-white/10 mx-1 animate-in fade-in" />
-                    
-                    <Tooltip content="Graticule">
-                        <button
-                            onClick={() => setShowGraticule(!showGraticule)}
-                            className={`w-5 h-5 flex items-center justify-center rounded transition-colors animate-in fade-in ${showGraticule ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}
-                        >
-                            <Icon component={Crosshair} size={12} weight="bold" />
-                        </button>
-                    </Tooltip>
+            {/* Right Side Tools */}
+            <div className="flex items-center gap-1.5 pointer-events-auto bg-black/40 backdrop-blur-md rounded-md p-1 border border-white/10 shadow-lg">
+                <Tooltip content={getPersistenceLabel()}>
+                    <button
+                        onClick={handlePersistenceToggle}
+                        className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${persistenceMode > 0 ? 'bg-blue-600/20 text-blue-400' : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'}`}
+                    >
+                        <Icon component={Clock} size={14} weight={persistenceMode > 0 ? 'fill' : 'bold'} />
+                    </button>
+                </Tooltip>
 
-                    <Tooltip content="Targets">
-                        <button
-                            onClick={() => setShowTargets(!showTargets)}
-                            className={`w-5 h-5 flex items-center justify-center rounded transition-colors animate-in fade-in ${showTargets ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}
-                        >
-                            <Icon component={Target} size={12} weight="bold" />
-                        </button>
-                    </Tooltip>
+                {mode === 'vector' && (
+                    <>
+                        <div className="w-px h-3 bg-white/10 mx-0.5" />
+                        
+                        <Tooltip content="Show Graticule">
+                            <button
+                                onClick={() => setShowGraticule(!showGraticule)}
+                                className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${showGraticule ? 'bg-white/10 text-white' : 'text-zinc-500 hover:text-zinc-200'}`}
+                            >
+                                <Icon component={Crosshair} size={14} weight="bold" />
+                            </button>
+                        </Tooltip>
 
-                    <Tooltip content="Skin Tone Line">
-                        <button
-                            onClick={() => setShowSkinLine(!showSkinLine)}
-                            className={`w-5 h-5 flex items-center justify-center rounded transition-colors animate-in fade-in ${showSkinLine ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}
-                        >
-                            <Icon component={User} size={12} weight="bold" />
-                        </button>
-                    </Tooltip>
-                </>
-            )}
+                        <Tooltip content="Show Targets">
+                            <button
+                                onClick={() => setShowTargets(!showTargets)}
+                                className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${showTargets ? 'bg-white/10 text-white' : 'text-zinc-500 hover:text-zinc-200'}`}
+                            >
+                                <Icon component={Target} size={14} weight="bold" />
+                            </button>
+                        </Tooltip>
+
+                        <Tooltip content="Skin Tone Line">
+                            <button
+                                onClick={() => setShowSkinLine(!showSkinLine)}
+                                className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${showSkinLine ? 'bg-white/10 text-white' : 'text-zinc-500 hover:text-zinc-200'}`}
+                            >
+                                <Icon component={User} size={14} weight="bold" />
+                            </button>
+                        </Tooltip>
+                    </>
+                )}
+            </div>
         </div>
         
-        {!transparent && (
-            <div className="absolute inset-0 pointer-events-none opacity-20 flex flex-col justify-between p-4 z-0">
-                <div className="w-full h-px bg-white/50" />
-                <div className="w-full h-px bg-white/20" />
-                <div className="w-full h-px bg-white/20" />
-                <div className="w-full h-px bg-white/50" />
+        {/* Waveform Graticule Overlay (Only for Waveform Modes) */}
+        {!transparent && mode !== 'vector' && (
+            <div className="absolute inset-0 pointer-events-none select-none z-0">
+                <svg className="w-full h-full opacity-20" preserveAspectRatio="none">
+                    {/* Horizontal Lines (IRE Levels) */}
+                    {[0, 0.25, 0.5, 0.75, 1].map((p) => (
+                        <line 
+                            key={p}
+                            x1="0" 
+                            y1={`${(1 - p) * 100}%`} 
+                            x2="100%" 
+                            y2={`${(1 - p) * 100}%`} 
+                            stroke="white" 
+                            strokeWidth="1"
+                            strokeDasharray={p === 0 || p === 1 ? "" : "2 2"} 
+                        />
+                    ))}
+                </svg>
+                {/* IRE Labels */}
+                <div className="absolute right-1 top-0 bottom-0 flex flex-col justify-between text-[9px] font-mono text-zinc-600 text-right py-1 pr-1 pointer-events-none">
+                    <span>100</span>
+                    <span>75</span>
+                    <span>50</span>
+                    <span>25</span>
+                    <span>0</span>
+                </div>
             </div>
         )}
 

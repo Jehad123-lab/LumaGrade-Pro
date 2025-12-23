@@ -56,9 +56,6 @@ uniform float defringePurpleHueOffset;
 uniform float defringeGreenAmount;
 uniform float defringeGreenHueOffset;
 
-// Transform Uniform (Matrix 3x3)
-uniform mat3 uTransformMatrix;
-
 uniform float toneMapping; // 0=Standard, 1=Filmic, 2=AgX, 3=Soft, 4=Neutral
 uniform float toneStrength; // 0.0 - 1.0
 
@@ -96,6 +93,11 @@ uniform sampler3D tLut;
 uniform float lutIntensity;
 uniform float hasLut;
 uniform float lutSize; 
+
+// Split/False Color
+uniform int comparisonMode; // 0=off, 1=split, 2=bypass
+uniform float splitPosition; 
+uniform float falseColor; // 0 or 1
 
 // UTILS
 
@@ -169,6 +171,34 @@ vec3 hsl2rgb(vec3 hsl) {
         rgb.b = hue2rgb(p, q, hsl.x - 1.0/3.0);
     }
     return rgb;
+}
+
+// FALSE COLOR LOGIC
+// Maps luminance to standard IRE false color ranges
+vec3 getFalseColor(vec3 color) {
+    float l = getLuminance(color);
+    
+    vec3 outColor = vec3(l * 0.2); // Default to dimmed monochrome
+    
+    // 0 - 5 IRE: Purple (Underexposed)
+    if (l < 0.05) outColor = mix(vec3(0.5, 0.0, 0.5), vec3(0.2, 0.0, 0.5), l / 0.05);
+    
+    // 5 - 10 IRE: Blue
+    else if (l < 0.10) outColor = mix(vec3(0.0, 0.0, 1.0), vec3(0.0, 0.5, 1.0), (l - 0.05) / 0.05);
+    
+    // 40 - 50 IRE: Green (Skin Tones / Mid-Grey Card)
+    else if (l > 0.40 && l < 0.50) outColor = vec3(0.0, 0.8, 0.0);
+    
+    // 50 - 55 IRE: Pink (Skin Highlights)
+    else if (l >= 0.50 && l < 0.55) outColor = vec3(1.0, 0.6, 0.7);
+    
+    // 85 - 95 IRE: Yellow (Highlights)
+    else if (l > 0.85 && l < 0.95) outColor = vec3(1.0, 1.0, 0.0);
+    
+    // 95 - 100 IRE: Red (Clipping)
+    else if (l >= 0.95) outColor = vec3(1.0, 0.0, 0.0);
+    
+    return outColor;
 }
 
 // GRADING OPS
@@ -410,43 +440,125 @@ vec4 applyMultiPointColor(vec3 srgbColor) {
 // ----------------------------------------------------------------------
 
 // 1. Bilateral Denoise (Approx)
-// Samples neighbors, weights by spatial distance & color difference
+// Manually unrolled 3x3 kernel (9 taps)
 vec3 applyDenoise(vec3 color, vec2 uv, vec2 resolution, sampler2D tDiffuse) {
     if (denoise <= 0.0) return color;
     
-    // Constant loop bound for WebGL compatibility
-    // Using int loop (-2 to 2)
     float sigmaSpace = 2.0;
     float sigmaColor = 0.15; // Tolerance
     
     vec3 sum = vec3(0.0);
     float weightSum = 0.0;
-    
     vec2 px = 1.0 / resolution;
     
-    // Unrolled-ish loop with constant bounds
-    for (int i = -2; i <= 2; i++) {
-        for (int j = -2; j <= 2; j++) {
-            vec2 offset = vec2(float(i), float(j)) * px;
-            vec3 neighbor = texture2D(tDiffuse, uv + offset).rgb;
-            
-            // Spatial Weight (Gaussian)
-            float dist2 = float(i*i + j*j);
-            float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
-            
-            // Color Weight
-            vec3 diff = neighbor - color;
-            float diff2 = dot(diff, diff);
-            float wColor = exp(-diff2 / (2.0 * sigmaColor * sigmaColor));
-            
-            float weight = wSpace * wColor;
-            sum += neighbor * weight;
-            weightSum += weight;
-        }
+    // Tap 1: (0,0) Center
+    {
+        vec3 neighbor = texture2D(tDiffuse, uv).rgb;
+        float wSpace = 1.0;
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 2: (-1,-1)
+    {
+        vec2 off = vec2(-1.0, -1.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 2.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 3: (0,-1)
+    {
+        vec2 off = vec2(0.0, -1.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 1.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 4: (1,-1)
+    {
+        vec2 off = vec2(1.0, -1.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 2.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 5: (-1,0)
+    {
+        vec2 off = vec2(-1.0, 0.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 1.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 6: (1,0)
+    {
+        vec2 off = vec2(1.0, 0.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 1.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 7: (-1,1)
+    {
+        vec2 off = vec2(-1.0, 1.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 2.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 8: (0,1)
+    {
+        vec2 off = vec2(0.0, 1.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 1.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
+    }
+    // Tap 9: (1,1)
+    {
+        vec2 off = vec2(1.0, 1.0) * px;
+        vec3 neighbor = texture2D(tDiffuse, uv + off).rgb;
+        float dist2 = 2.0;
+        float wSpace = exp(-dist2 / (2.0 * sigmaSpace * sigmaSpace));
+        vec3 diff = neighbor - color;
+        float wColor = exp(-dot(diff, diff) / (2.0 * sigmaColor * sigmaColor));
+        float weight = wSpace * wColor;
+        sum += neighbor * weight;
+        weightSum += weight;
     }
     
-    // Blend based on strength
-    return mix(color, sum / max(weightSum, 0.001), denoise * 0.01); // denoise is 0-100
+    return mix(color, sum / max(weightSum, 0.001), denoise * 0.01);
 }
 
 // 2. Unsharp Masking with Threshold
@@ -569,25 +681,84 @@ vec3 calculateFinalColor(vec3 color, vec2 uv, vec2 resolution, sampler2D tCurves
     // 4. Halation (Linear)
     if (halation > 0.0) {
         vec3 haloAccum = vec3(0.0);
-        float samples = 0.0;
         float aspect = resolution.x / resolution.y;
         float radius = halation * 0.01; 
         
-        // Random jitter can cause derivative issues in some drivers
-        // We use a simpler pattern here to avoid "varying iteration" gradient warnings
-        float jitter = random(uv) * 6.28;
-        
-        for(int i = 0; i < 8; i++) {
-            float angle = jitter + (float(i) / 8.0) * 6.28;
-            vec2 offset = vec2(cos(angle), sin(angle)) * radius;
+        // Fixed 8-tap ring (manually unrolled)
+        // 1.
+        {
+            vec2 offset = vec2(1.0, 0.0) * radius;
             offset.x /= aspect; 
             vec3 s = texture2D(tDiffuse, uv + offset).rgb;
             s = sRGBToLinear(s); 
             vec3 brightness = max(vec3(0.0), s - 0.5); 
             haloAccum += brightness;
-            samples += 1.0;
         }
-        haloAccum /= samples;
+        // 2.
+        {
+            vec2 offset = vec2(0.707, 0.707) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        // 3.
+        {
+            vec2 offset = vec2(0.0, 1.0) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        // 4.
+        {
+            vec2 offset = vec2(-0.707, 0.707) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        // 5.
+        {
+            vec2 offset = vec2(-1.0, 0.0) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        // 6.
+        {
+            vec2 offset = vec2(-0.707, -0.707) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        // 7.
+        {
+            vec2 offset = vec2(0.0, -1.0) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        // 8.
+        {
+            vec2 offset = vec2(0.707, -0.707) * radius;
+            offset.x /= aspect; 
+            vec3 s = texture2D(tDiffuse, uv + offset).rgb;
+            s = sRGBToLinear(s); 
+            vec3 brightness = max(vec3(0.0), s - 0.5); 
+            haloAccum += brightness;
+        }
+        
+        haloAccum /= 8.0;
         vec3 haloTint = vec3(1.0, 0.4, 0.1); 
         color += haloAccum * haloTint * halation * 2.0;
     }
@@ -653,73 +824,46 @@ vec3 calculateFinalColor(vec3 color, vec2 uv, vec2 resolution, sampler2D tCurves
 `;
 
 export const FRAGMENT_SHADER = `
+${GRADING_UTILS}
+
 uniform sampler2D tDiffuse;
 uniform sampler2D tCurves;
 uniform vec2 resolution;
 
-// Split Screen
-uniform int comparisonMode; // 0=off, 1=split, 2=bypass
-uniform float splitPosition; // 0.0 - 1.0
-
-// Optics
 uniform float distortion;
-uniform float distortionCrop; // 0.0 or 1.0
+uniform float distortionCrop;
 uniform float chromaticAberration;
 
 varying vec2 vUv;
 
-${GRADING_UTILS}
-
 void main() {
-    // 0. Transform (Geometry)
-    // Using Matrix Homography
-    // Input UV (0..1) -> Local (-0.5..0.5) -> Matrix -> Perspective Divide -> UV
+    vec2 uv = vUv;
     
-    vec3 coord = vec3(vUv - 0.5, 1.0);
-    vec3 newCoord = uTransformMatrix * coord;
+    // Apply Distortion (Simple Lens Model)
+    if (abs(distortion) > 0.01) {
+        vec2 center = vec2(0.5);
+        vec2 rel = uv - center;
+        float r2 = dot(rel, rel);
+        float f = 1.0 + (distortion * 0.01) * r2; 
+        uv = center + rel * f;
+    }
     
-    // Avoid division by zero
-    if (abs(newCoord.z) < 0.0001) newCoord.z = 0.0001;
-    
-    vec2 uv = (newCoord.xy / newCoord.z) + 0.5;
-    
-    // Bounds check for Transform (Transparent background if out of bounds)
+    // Bounds check
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
+        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
-    // 1. Geometric Distortion (Lens)
-    if (abs(distortion) > 0.001) {
-        vec2 center = uv - 0.5;
-        float r2 = dot(center, center);
-        float f = 1.0 + r2 * (distortion * -0.01);
-        
-        // Dynamic Crop Logic
-        if (distortionCrop > 0.5 && distortion < 0.0) {
-             float maxR2 = 0.5;
-             float fCorner = 1.0 + maxR2 * (distortion * -0.01);
-             float zoom = 1.0 / fCorner;
-             f *= zoom;
-        }
-        
-        uv = center * f + 0.5;
-    }
-    
-    // Bounds check again after distortion
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);
-        return;
-    }
+    vec3 baseColor = vec3(0.0);
 
-    // 2. Chromatic Aberration
-    vec3 baseColor;
-    if (chromaticAberration > 0.0) {
-        float caAmount = chromaticAberration * 0.005;
-        vec2 caOffset = (uv - 0.5) * caAmount;
-        // Basic clamp
-        vec2 uvR = clamp(uv - caOffset, 0.0, 1.0);
-        vec2 uvB = clamp(uv + caOffset, 0.0, 1.0);
+    // Chromatic Aberration
+    if (abs(chromaticAberration) > 0.01) {
+        vec2 center = vec2(0.5);
+        vec2 dist = uv - center;
+        float strength = chromaticAberration * 0.002;
+        
+        vec2 uvR = uv - dist * strength;
+        vec2 uvB = uv + dist * strength;
         
         float r = texture2D(tDiffuse, uvR).r;
         float g = texture2D(tDiffuse, uv).g;
@@ -728,30 +872,31 @@ void main() {
     } else {
         baseColor = texture2D(tDiffuse, uv).rgb;
     }
-    
-    vec4 tex = vec4(baseColor, 1.0);
-    
+
+    // -- Pipeline Output Calculation --
+    vec3 gradedColor = calculateFinalColor(baseColor, uv, resolution, tCurves, tDiffuse);
+
+    // -- View Logic: Split Screen / Bypass --
+    vec3 displayColor = gradedColor;
+
     if (comparisonMode == 2) {
-        gl_FragColor = tex;
-        return;
-    }
-
-    vec3 graded = calculateFinalColor(tex.rgb, uv, resolution, tCurves, tDiffuse);
-    
-    if (comparisonMode == 1) {
-        float lineWidth = 0.002;
-        if (abs(vUv.x - splitPosition) < lineWidth) {
-             gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); 
-             return;
-        }
-
-        if (vUv.x > splitPosition) {
-             gl_FragColor = vec4(graded, tex.a);
+        // Bypass Mode
+        displayColor = baseColor;
+    } else if (comparisonMode == 1) {
+        // Split Screen (Standard: Left=Before, Right=After)
+        // Adjust for Split Position
+        if (vUv.x < splitPosition) {
+             displayColor = baseColor; // Original
         } else {
-             gl_FragColor = tex;
+             displayColor = gradedColor; // Graded
         }
-    } else {
-        gl_FragColor = vec4(graded, tex.a);
     }
+
+    // -- False Color Overlay (Applied to Final Display) --
+    if (falseColor > 0.5) {
+        displayColor = getFalseColor(displayColor);
+    }
+
+    gl_FragColor = vec4(displayColor, 1.0);
 }
 `;

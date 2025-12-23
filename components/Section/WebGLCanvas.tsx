@@ -1,12 +1,12 @@
 
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
 import * as THREE from 'three';
-import { GradingParams, MediaState, CurvePoint, ToolType, GuideLine } from '../../types';
+import { GradingParams, MediaState, CurvePoint, ToolType, WebGLCanvasRef } from '../../types';
 import { FRAGMENT_SHADER, VERTEX_SHADER } from '../../constants';
 import { MonotoneCubicSpline } from '../../spline';
 import { WaveformMonitor } from './WaveformMonitor';
 import { Icon } from '../Core/Icon';
-import { ChartLine } from '@phosphor-icons/react';
+import { ChartLine, ArrowsLeftRight } from '@phosphor-icons/react';
 import { parseCubeLUT } from '../../lutParser';
 import { getPrePointColor, rgb2hsl } from '../../lutEngine';
 
@@ -19,6 +19,8 @@ interface WebGLCanvasProps {
   fitSignal?: number;
   activeTool: ToolType;
   onSamplePointColor: (hue: number, sat: number, lum: number) => void;
+  onUpdateSplitPosition?: (pos: number) => void;
+  onTimeUpdate?: (time: number) => void;
 }
 
 function getTintVector(hue: number, sat: number) {
@@ -35,10 +37,10 @@ function getTintVector(hue: number, sat: number) {
 
 const MIXER_ORDER = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'];
 
-export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({ 
+export const WebGLCanvas = forwardRef<WebGLCanvasRef, WebGLCanvasProps>(({ 
     grading, media, onMediaLoaded, isPlaying, seekTime, fitSignal, 
-    activeTool, onSamplePointColor
-}) => {
+    activeTool, onSamplePointColor, onUpdateSplitPosition, onTimeUpdate
+}, ref) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -55,119 +57,146 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
 
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const isDraggingRef = useRef(false);
+  const isDraggingSplitRef = useRef(false);
   const lastMouseRef = useRef({ x: 0, y: 0 });
   const [showScope, setShowScope] = useState(false);
 
-  // Guide Drawing State
-  const [drawingGuide, setDrawingGuide] = useState<GuideLine | null>(null);
-
   const raycasterRef = useRef(new THREE.Raycaster());
 
-  // Matrix Computation Helper
-  // returns 3x3 matrix as array of 9 floats (column-major for WebGL)
-  const computeTransformMatrix = (p: GradingParams['transform']) => {
-      const m = new THREE.Matrix3();
-      
-      // 1. Center Offset
-      const t1 = new THREE.Matrix3().set(
-          1, 0, -0.5,
-          0, 1, -0.5,
-          0, 0, 1
-      );
+  // Maintain latest ref for callback
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  useEffect(() => { onTimeUpdateRef.current = onTimeUpdate; }, [onTimeUpdate]);
 
-      // 2. Rotate
-      const rad = THREE.MathUtils.degToRad(p.rotate);
-      const c = Math.cos(rad);
-      const s = Math.sin(rad);
-      const r = new THREE.Matrix3().set(
-          c, -s, 0,
-          s, c, 0,
-          0, 0, 1
-      );
+  // --- Export Methods ---
+  useImperativeHandle(ref, () => ({
+      exportImage: (filename: string) => {
+          if (!mountRef.current || !rendererRef.current) return;
+          const canvas = mountRef.current.querySelector('canvas');
+          if (!canvas) {
+              alert('Export failed: Canvas not found');
+              return;
+          }
 
-      // 3. Scale & Aspect
-      // Scale: 100 = 1.0. 
-      // Aspect: >0 makes Y smaller (taller image), <0 makes X smaller (wider image) in uv space?
-      // Actually, aspect > 0 usually stretches width? Let's check Lightoom behavior.
-      // Aspect > 0 => Taller (so we squeeze Y in UV space, or stretch X). 
-      // Let's implement Aspect by scaling Y.
-      const scl = Math.max(0.01, p.scale / 100);
-      const asp = p.aspect / 100;
-      // If aspect > 0, we want to scale Y down in UV space (to sample less Y range, zooming Y in) or scale X up?
-      // Usually Aspect Ratio slider changes the frame aspect.
-      // Let's assume standard behavior: Aspect adjusts X/Y ratio.
-      // We'll scale Y by (1 + aspect).
-      const sy = scl * (1 + (asp < 0 ? asp : 0)); // If asp -0.5, y is 0.5 (squashed)
-      const sx = scl * (1 - (asp > 0 ? asp : 0));
-      
-      const sMat = new THREE.Matrix3().set(
-          1/sx, 0, 0,
-          0, 1/sy, 0,
-          0, 0, 1
-      );
+          // Force a render to ensure the buffer is fresh
+          if (sceneRef.current && cameraRef.current) {
+              rendererRef.current.render(sceneRef.current, cameraRef.current);
+          }
 
-      // 4. Perspective (Homography skew)
-      // Simple perspective simulation via w-component manipulation in matrix 3x3
-      // We put Vertical/Horizontal into the last row/column.
-      // For 2D homography:
-      // [ 1  0  0 ]
-      // [ 0  1  0 ]
-      // [ vx hy 1 ]
-      const vx = p.vertical / 100 * 0.01; // Sensitivity
-      const hy = p.horizontal / 100 * 0.01;
-      
-      // Note: In ThreeJS Matrix3 set(), it's row-major arguments, but stores column-major.
-      // set(n11, n12, n13, ...)
-      // We want to affect the Z (w) component based on x/y position.
-      const pMat = new THREE.Matrix3().set(
-          1, 0, 0,
-          0, 1, 0,
-          vx * -20, hy * -20, 1 // Trial and error sensitivity
-      );
+          try {
+              const url = canvas.toDataURL('image/png', 1.0);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = filename;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+          } catch (e) {
+              console.error(e);
+              alert('Export failed. Security error (Tainted Canvas). Ensure media is CORS enabled.');
+          }
+      },
+      exportVideo: async (filename: string, onProgress: (p: number) => void, onComplete: () => void) => {
+          if (!mountRef.current || !videoElementRef.current) {
+              alert('No video loaded');
+              onComplete();
+              return;
+          }
+          const canvas = mountRef.current.querySelector('canvas');
+          if (!canvas) {
+              onComplete();
+              return;
+          }
 
-      // 5. User Offset (Translation)
-      const ox = -p.xOffset / 100; // Invert for intuitive drag
-      const oy = p.yOffset / 100;
-      const t2 = new THREE.Matrix3().set(
-          1, 0, 0.5 + ox,
-          0, 1, 0.5 + oy,
-          0, 0, 1
-      );
+          const video = videoElementRef.current;
+          const wasPlaying = !video.paused;
+          
+          video.pause();
+          video.currentTime = 0;
+          video.volume = 1.0;
+          video.muted = false;
 
-      // Multiply Order: T2 * P * S * R * T1
-      // We want to apply operations in local space roughly.
-      
-      m.multiply(t1); // Move to 0,0
-      m.multiply(r);  // Rotate
-      m.multiply(sMat); // Scale
-      m.multiply(pMat); // Perspective
-      // We need to apply perspective BEFORE translating back?
-      // Actually standard: UV -> Centered -> Rotate/Scale -> Perspective -> Back
-      // But Perspective modifies W, so we need to be careful with ordering.
-      // Let's rely on the chain:
-      // Output = T2 * (P * (S * (R * (T1 * Input))))
-      
-      // Let's pre-multiply carefully:
-      // m = t1
-      // m = r * m
-      // m = sMat * m
-      // m = pMat * m
-      // m = t2 * m
-      // But matrix mult is post-multiply in ThreeJS `multiply` method? 
-      // No, A.multiply(B) -> A = A * B.
-      
-      // Let's reset and chain strictly
-      m.identity();
-      m.premultiply(t2);
-      m.premultiply(pMat); // Perspective applied near end of chain (outer)
-      m.premultiply(sMat);
-      m.premultiply(r);
-      m.premultiply(t1);
+          // MIME Type Check
+          let mimeType = '';
+          const types = ['video/webm; codecs=vp9', 'video/webm; codecs=vp8', 'video/webm', 'video/mp4'];
+          for (const t of types) {
+              if (MediaRecorder.isTypeSupported(t)) { mimeType = t; break; }
+          }
 
-      return m;
-  };
+          if (!mimeType) {
+              alert('Browser does not support video recording.');
+              onComplete();
+              return;
+          }
 
-  const transformMatrix = useMemo(() => computeTransformMatrix(grading.transform), [grading.transform]);
+          const canvasStream = canvas.captureStream(30); 
+          let finalStream = canvasStream;
+          
+          // Audio
+          let audioTracks: MediaStreamTrack[] = [];
+          // @ts-ignore
+          if (video.captureStream || video.mozCaptureStream) {
+              // @ts-ignore
+              const vidStream = video.captureStream ? video.captureStream() : video.mozCaptureStream();
+              audioTracks = vidStream.getAudioTracks();
+              if (audioTracks.length > 0) {
+                  finalStream = new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks]);
+              }
+          }
+
+          const recorder = new MediaRecorder(finalStream, {
+              mimeType,
+              videoBitsPerSecond: 8000000 
+          });
+
+          const chunks: Blob[] = [];
+          recorder.ondataavailable = (e) => {
+              if (e.data.size > 0) chunks.push(e.data);
+          };
+
+          recorder.onstop = () => {
+              const blob = new Blob(chunks, { type: mimeType });
+              let safeName = filename;
+              if (mimeType.includes('mp4') && safeName.endsWith('.webm')) {
+                  safeName = safeName.replace('.webm', '.mp4');
+              }
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = safeName;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              URL.revokeObjectURL(url);
+              
+              finalStream.getTracks().forEach(t => t.stop());
+              
+              video.currentTime = 0;
+              if (wasPlaying) video.play();
+              onComplete();
+          };
+
+          recorder.start();
+          try {
+              await video.play();
+          } catch(e) {
+              console.error(e);
+              recorder.stop();
+              onComplete();
+              return;
+          }
+
+          const checkProgress = () => {
+              if (!videoElementRef.current) return;
+              if (video.ended || video.currentTime >= video.duration) {
+                  if (recorder.state !== 'inactive') recorder.stop();
+              } else {
+                  onProgress(video.currentTime / video.duration);
+                  requestAnimationFrame(checkProgress);
+              }
+          };
+          checkProgress();
+      }
+  }));
 
   // Initialize Three.js
   useEffect(() => {
@@ -257,9 +286,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
         defringeGreenAmount: { value: 0 },
         defringeGreenHueOffset: { value: 0 },
 
-        // Transform Matrix
-        uTransformMatrix: { value: new THREE.Matrix3() },
-
         grain: { value: 0 },
         grainSize: { value: 1.0 },
         grainRoughness: { value: 0.5 },
@@ -291,7 +317,8 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
 
         resolution: { value: new THREE.Vector2(width, height) },
         comparisonMode: { value: 0 },
-        splitPosition: { value: 0.5 }
+        splitPosition: { value: 0.5 },
+        falseColor: { value: 0 }
       },
       vertexShader: VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER
@@ -304,9 +331,15 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
 
     const animate = () => {
       animationFrameRef.current = requestAnimationFrame(animate);
-      if (media.type === 'video' && videoElementRef.current && textureRef.current) {
+      
+      // Check videoElementRef directly instead of stale media closure
+      if (videoElementRef.current && textureRef.current) {
         if (videoElementRef.current.readyState >= videoElementRef.current.HAVE_CURRENT_DATA) {
           textureRef.current.needsUpdate = true;
+        }
+        // Use ref for callback to ensure we use the latest function
+        if (onTimeUpdateRef.current) {
+            onTimeUpdateRef.current(videoElementRef.current.currentTime);
         }
       }
       renderer.render(scene, camera);
@@ -346,6 +379,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
     const size = 256;
     const data = new Uint8Array(size * 4 * 4); 
     const generateRow = (points: CurvePoint[], rowIndex: number) => {
+        if (!points) return;
         const sorted = [...points].sort((a, b) => a.x - b.x);
         const xs: number[] = [];
         const ys: number[] = [];
@@ -402,7 +436,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
       u.clarity.value = grading.clarity || 0;
       u.dehaze.value = grading.dehaze || 0;
       
-      // Detail
       const detail = grading.detail || { denoise: 0, sharpening: { amount: 0, radius: 1, detail: 0, masking: 0 } };
       u.denoise.value = detail.denoise;
       u.sharpenAmount.value = detail.sharpening.amount;
@@ -417,15 +450,11 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
       u.distortionCrop.value = grading.distortionCrop ? 1.0 : 0.0;
       u.chromaticAberration.value = grading.chromaticAberration || 0;
       
-      // Defringe
       const def = grading.defringe || { purpleAmount: 0, purpleHueOffset: 0, greenAmount: 0, greenHueOffset: 0 };
       u.defringePurpleAmount.value = def.purpleAmount;
       u.defringePurpleHueOffset.value = def.purpleHueOffset;
       u.defringeGreenAmount.value = def.greenAmount;
       u.defringeGreenHueOffset.value = def.greenHueOffset;
-
-      // Transform Matrix
-      u.uTransformMatrix.value = transformMatrix;
 
       u.grain.value = grading.grain;
       u.grainSize.value = grading.grainSize;
@@ -446,6 +475,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
       if (grading.comparisonMode === 'toggle') compMode = 2;
       u.comparisonMode.value = compMode;
       u.splitPosition.value = grading.splitPosition;
+      u.falseColor.value = grading.falseColor ? 1.0 : 0.0;
 
       const mixerArr = MIXER_ORDER.map(key => {
           const ch = grading.colorMixer[key as keyof typeof grading.colorMixer];
@@ -457,7 +487,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
       });
       u.cmOffsets.value = mixerArr;
       
-      // Point Color Arrays
       if (grading.pointColor && Array.isArray(grading.pointColor.points)) {
           const points = grading.pointColor.points;
           
@@ -501,7 +530,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
       u.cgBlending.value = cg.blending / 100;
       u.cgBalance.value = cg.balance / 100;
     }
-  }, [grading, transformMatrix]);
+  }, [grading]); 
 
   const fitToScreen = useCallback(() => {
     if (!mountRef.current || !media.width || !media.height) return;
@@ -578,7 +607,9 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
     };
 
     if (media.type === 'image') {
-       new THREE.TextureLoader().load(media.url, (tex) => {
+       const loader = new THREE.TextureLoader();
+       loader.setCrossOrigin('anonymous');
+       loader.load(media.url, (tex) => {
          tex.minFilter = THREE.LinearFilter;
          tex.magFilter = THREE.LinearFilter;
          tex.generateMipmaps = false;
@@ -591,7 +622,8 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
        const video = document.createElement('video');
        video.src = media.url;
        video.loop = true;
-       video.muted = true;
+       video.muted = false; // Enabled audio
+       video.volume = 1.0;
        video.crossOrigin = 'anonymous';
        video.playsInline = true;
        video.load();
@@ -642,6 +674,20 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
+      // Split Slider Handling
+      if (grading.comparisonMode === 'split') {
+          const rect = mountRef.current?.getBoundingClientRect();
+          if (rect) {
+              const xPos = e.clientX - rect.left;
+              const splitX = grading.splitPosition * rect.width;
+              if (Math.abs(xPos - splitX) < 15) {
+                  isDraggingSplitRef.current = true;
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  return;
+              }
+          }
+      }
+
       const rect = mountRef.current?.getBoundingClientRect();
       if (!rect || !meshRef.current || !cameraRef.current) return;
 
@@ -677,25 +723,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
           return; 
       }
 
-      // TOOL: Guided Upright
-      if (activeTool === 'guided-upright') {
-          if (intersects.length > 0) {
-              const uv = intersects[0].uv;
-              if (uv) {
-                  // Start drawing a new guide
-                  const newGuide: GuideLine = {
-                      id: Date.now().toString(),
-                      x1: uv.x, y1: uv.y,
-                      x2: uv.x, y2: uv.y,
-                      type: 'vertical' // Determined later? Or we default.
-                  };
-                  setDrawingGuide(newGuide);
-                  e.currentTarget.setPointerCapture(e.pointerId);
-              }
-          }
-          return;
-      }
-
       // Default: Pan
       isDraggingRef.current = true;
       lastMouseRef.current = { x: e.clientX, y: e.clientY };
@@ -703,15 +730,13 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-      // Guide Drawing Update
-      if (activeTool === 'guided-upright' && drawingGuide && meshRef.current && cameraRef.current && mountRef.current) {
-          const rect = mountRef.current.getBoundingClientRect();
-          const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-          const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-          raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
-          const intersects = raycasterRef.current.intersectObject(meshRef.current);
-          if (intersects.length > 0 && intersects[0].uv) {
-              setDrawingGuide(prev => prev ? ({ ...prev, x2: intersects[0].uv!.x, y2: intersects[0].uv!.y }) : null);
+      // Split Dragging
+      if (isDraggingSplitRef.current) {
+          const rect = mountRef.current?.getBoundingClientRect();
+          if (rect && onUpdateSplitPosition) {
+              const xPos = e.clientX - rect.left;
+              const newSplit = Math.max(0, Math.min(1, xPos / rect.width));
+              onUpdateSplitPosition(newSplit);
           }
           return;
       }
@@ -728,14 +753,8 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-      if (activeTool === 'guided-upright' && drawingGuide) {
-          // Finish drawing guide
-          // Logic to add guide to state could be here if we were implementing full logic
-          // For now, let's just clear it to demonstrate the interaction
-          setDrawingGuide(null);
-      }
-
       isDraggingRef.current = false;
+      isDraggingSplitRef.current = false;
       e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
@@ -743,7 +762,6 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
     <div 
         className={`w-full h-full bg-black relative flex items-center justify-center overflow-hidden group 
             ${activeTool === 'point-picker' ? 'cursor-crosshair' : ''} 
-            ${activeTool === 'guided-upright' ? 'cursor-cell' : ''} 
             ${activeTool === 'move' ? 'cursor-grab active:cursor-grabbing' : ''}`}
         onWheel={handleWheel}
         onPointerDown={handlePointerDown}
@@ -759,33 +777,37 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
         />
         <div ref={mountRef} className="w-full h-full z-10 relative pointer-events-none" />
         
-        {/* Guide Overlay */}
-        {activeTool === 'guided-upright' && (
-            <svg className="absolute inset-0 w-full h-full pointer-events-none z-20">
-                {drawingGuide && (
-                    <line 
-                        x1={`${drawingGuide.x1 * 100}%`} y1={`${(1 - drawingGuide.y1) * 100}%`} 
-                        x2={`${drawingGuide.x2 * 100}%`} y2={`${(1 - drawingGuide.y2) * 100}%`} 
-                        stroke="#00ffff" strokeWidth="2" strokeDasharray="4"
-                    />
-                )}
-            </svg>
+        {/* Split Screen Handle Overlay */}
+        {grading.comparisonMode === 'split' && (
+            <div 
+                className="absolute top-0 bottom-0 z-50 cursor-ew-resize group/split"
+                style={{ left: `${grading.splitPosition * 100}%` }}
+                onPointerDown={(e) => { 
+                    // Let the parent pointerDown handle this capture via hit testing
+                }}
+            >
+                <div className="absolute left-0 top-0 bottom-0 w-px bg-white shadow-[0_0_10px_rgba(0,0,0,0.5)]"></div>
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/20 backdrop-blur-md border border-white/50 flex items-center justify-center opacity-0 group-hover/split:opacity-100 transition-opacity">
+                     <Icon component={ArrowsLeftRight} size={16} weight="bold" />
+                </div>
+            </div>
         )}
 
-        {/* Grid Overlay when in Geometry tab or Transform Tool is implied */}
-        {(activeTool === 'guided-upright' || activeTool === 'move') && (
-            <div className="absolute inset-0 z-10 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-500">
-                 {/* Subtle 3x3 Grid Rule of Thirds */}
-                 <div className="absolute top-0 bottom-0 left-1/3 w-px bg-white/20" />
-                 <div className="absolute top-0 bottom-0 left-2/3 w-px bg-white/20" />
-                 <div className="absolute left-0 right-0 top-1/3 h-px bg-white/20" />
-                 <div className="absolute left-0 right-0 top-2/3 h-px bg-white/20" />
-            </div>
+        {/* Labels for Split Screen */}
+        {grading.comparisonMode === 'split' && (
+            <>
+                <div className="absolute top-4 left-4 bg-black/50 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-widest text-zinc-400 z-40 pointer-events-none">
+                    Original
+                </div>
+                <div className="absolute top-4 right-4 bg-black/50 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-widest text-zinc-400 z-40 pointer-events-none">
+                    Graded
+                </div>
+            </>
         )}
 
         {/* Waveform Overlay Toggle & Container */}
         {media.url && (
-            <div className="absolute top-4 left-4 z-30 pointer-events-auto flex flex-col gap-2">
+            <div className="absolute bottom-4 left-4 z-30 pointer-events-auto flex flex-col gap-2">
                  <button 
                      onClick={() => setShowScope(!showScope)}
                      className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${showScope ? 'bg-blue-600 text-white' : 'bg-black/60 text-zinc-400 hover:text-white border border-white/10'}`}
@@ -797,7 +819,7 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
 
                  {showScope && (
                      <div 
-                        className="w-[280px] h-[180px] bg-black/80 backdrop-blur-xl rounded-xl border border-white/10 overflow-hidden shadow-2xl animate-in fade-in slide-in-from-top-2 duration-200"
+                        className="w-[280px] h-[180px] bg-black/80 backdrop-blur-xl rounded-xl border border-white/10 overflow-hidden shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-200"
                         onPointerDown={(e) => e.stopPropagation()} 
                      >
                          <WaveformMonitor 
@@ -820,4 +842,4 @@ export const WebGLCanvas: React.FC<WebGLCanvasProps> = ({
         )}
     </div>
   );
-};
+});

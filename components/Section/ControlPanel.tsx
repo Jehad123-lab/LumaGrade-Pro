@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { Slider } from '../Core/Slider';
 import { GradingParams, Preset, ToolType, PointColorData } from '../../types';
@@ -7,10 +8,10 @@ import { ColorMixer } from './ColorMixer';
 import { Icon } from '../Core/Icon';
 import { 
     Check, Plus, Trash, X, UploadSimple,
-    Faders, Palette, ChartLineUp, Sparkle, Swatches, SplitHorizontal, Camera, Aperture, Eyedropper, CaretRight, CaretDown, Triangle, Crop, BoundingBox,
-    MagicWand
+    Faders, Palette, ChartLineUp, Sparkle, Swatches, Triangle, Camera, Eyedropper, CaretRight, Crop,
+    SquaresFour, Square
 } from '@phosphor-icons/react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { Tooltip } from '../Core/Tooltip';
 import { parseCubeLUT } from '../../lutParser';
 
@@ -22,7 +23,6 @@ interface ControlPanelProps {
   onSavePreset: (name: string) => void;
   onLoadPreset: (preset: Preset) => void;
   onDeletePreset: (id: string) => void;
-  // Tool Props for Eyedropper
   activeTool: ToolType;
   onToolChange: (tool: ToolType) => void;
 }
@@ -187,7 +187,6 @@ const TONE_MODES: Record<string, { label: string, title: string, desc: string }>
 };
 
 type TabId = 'develop' | 'color' | 'curves' | 'detail' | 'effects' | 'geometry' | 'calibration' | 'presets';
-type ColorSubTab = 'mixer' | 'point';
 
 export const ControlPanel: React.FC<ControlPanelProps> = ({ 
     values, onChange, onCommit, presets, 
@@ -195,14 +194,19 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
     activeTool, onToolChange
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('develop');
-  const [colorSubTab, setColorSubTab] = useState<ColorSubTab>('mixer');
   const [gradingTab, setGradingTab] = useState<'wheels' | 'mixer' | 'point'>('wheels');
+  
+  const [wheelsView, setWheelsView] = useState<'all' | 'single'>('all');
+  const [singleWheelTarget, setSingleWheelTarget] = useState<'shadows' | 'midtones' | 'highlights'>('midtones');
+
   const [isSaving, setIsSaving] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
-  const [deleteId, setDeleteId] = useState<string | null>(null);
   const [rangeCollapsed, setRangeCollapsed] = useState(false);
   
   const lutInputRef = useRef<HTMLInputElement>(null);
+
+  // Safe access for optional defringe object in legacy presets
+  const defringe = values.defringe || { purpleAmount: 0, purpleHueOffset: 0, greenAmount: 0, greenHueOffset: 0 };
   
   // -- Handlers --
 
@@ -216,7 +220,6 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
       onChange('colorGrading', newVal, false);
   };
   
-  // ... Point color handlers
   const handlePointUpdate = (index: number, key: keyof PointColorData, val: any) => {
       const points = [...values.pointColor.points];
       points[index] = { ...points[index], [key]: val };
@@ -234,7 +237,6 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
        onChange('pointColor', { ...values.pointColor, points, activePointIndex: -1 }, true);
   };
 
-  // ... LUT Handler
   const handleLutUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
@@ -247,48 +249,45 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
       reader.readAsText(file);
   };
 
-  // Reset Transform
-  const handleResetTransform = () => {
-      onChange('transform', { 
-          vertical: 0, horizontal: 0, rotate: 0, aspect: 0, scale: 100, xOffset: 0, yOffset: 0, guides: [] 
-      }, true);
-      if (activeTool === 'guided-upright') onToolChange('move');
-  };
-
-  // --- Render Tabs ---
-  const renderTabButton = (id: TabId, icon: any, label: string) => (
-      <Tooltip content={label} side="right">
-        <button
-            onClick={() => setActiveTab(id)}
-            className={`w-10 h-10 rounded-lg flex items-center justify-center mb-2 transition-all duration-200 ${activeTab === id ? 'bg-zinc-100 text-zinc-900 shadow-md' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}
-        >
-            <Icon component={icon} size={20} weight={activeTab === id ? 'fill' : 'regular'} />
-        </button>
-      </Tooltip>
-  );
+  const TABS = [
+    { id: 'develop', icon: Faders, label: 'Basic' },
+    { id: 'color', icon: Palette, label: 'Color' },
+    { id: 'curves', icon: ChartLineUp, label: 'Curves' },
+    { id: 'detail', icon: Triangle, label: 'Detail' },
+    { id: 'geometry', icon: Crop, label: 'Optics' },
+    { id: 'effects', icon: Sparkle, label: 'Effects' },
+    { id: 'calibration', icon: Camera, label: 'Calib' },
+    { id: 'presets', icon: Swatches, label: 'Library' },
+  ];
 
   return (
-    <div className="flex h-full w-full bg-[#0c0c0e]">
-        {/* Vertical Tab Bar */}
-        <div className="w-14 shrink-0 flex flex-col items-center py-4 border-r border-white/5 bg-[#09090b] z-20">
-            {renderTabButton('develop', Faders, 'Develop')}
-            {renderTabButton('color', Palette, 'Color')}
-            {renderTabButton('curves', ChartLineUp, 'Curves')}
-            {renderTabButton('detail', Triangle, 'Detail')}
-            {renderTabButton('effects', Sparkle, 'Effects')}
-            {renderTabButton('geometry', Crop, 'Geometry')}
-            {renderTabButton('calibration', Camera, 'Calibration')}
-            <div className="flex-1" />
-            {renderTabButton('presets', Swatches, 'Presets')}
+    <div className="flex flex-col h-full w-full bg-[#0c0c0e]">
+        {/* Top Tab Bar */}
+        <div className="shrink-0 h-11 border-b border-white/5 bg-[#09090b] flex items-center px-2 gap-1 overflow-x-auto select-none z-20">
+            {TABS.map(tab => (
+                <button
+                    key={tab.id}
+                    onClick={() => setActiveTab(tab.id as TabId)}
+                    className={`
+                        shrink-0 h-8 px-3 rounded-md flex items-center gap-2 text-[11px] font-medium transition-all
+                        ${activeTab === tab.id 
+                            ? 'bg-zinc-100 text-zinc-950 shadow-sm' 
+                            : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}
+                    `}
+                >
+                    <Icon component={tab.icon} size={16} weight={activeTab === tab.id ? 'fill' : 'regular'} />
+                    <span>{tab.label}</span>
+                </button>
+            ))}
         </div>
 
         {/* Content Area */}
-        <div className="flex-1 h-full overflow-y-auto custom-scrollbar relative bg-[#0c0c0e]">
-            <div className="p-5 pb-20 space-y-6">
+        <div className="flex-1 overflow-y-auto custom-scrollbar relative bg-[#0c0c0e]">
+            <div className="p-4 space-y-6 max-w-full">
                 
                 {/* Develop Tab */}
                 {activeTab === 'develop' && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                    <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
                          <div className="space-y-4">
                             <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-4">Light</h3>
                             <Slider label="Exposure" value={values.exposure} min={-5} max={5} onChange={(v) => onChange('exposure', v)} onCommit={onCommit} />
@@ -331,13 +330,14 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                 
                 {/* Color Tab */}
                 {activeTab === 'color' && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
-                        <div className="flex bg-zinc-900 p-1 rounded-lg">
+                    <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
+                        {/* Main Sub-tab switcher */}
+                        <div className="flex bg-zinc-900/50 p-1 rounded-lg border border-white/5">
                             {['wheels', 'mixer', 'point'].map((t) => (
                                 <button
                                     key={t}
                                     onClick={() => setGradingTab(t as any)}
-                                    className={`flex-1 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${gradingTab === t ? 'bg-zinc-700 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                    className={`flex-1 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${gradingTab === t ? 'bg-zinc-800 text-white shadow-sm border border-white/10' : 'text-zinc-500 hover:text-zinc-300'}`}
                                 >
                                     {t}
                                 </button>
@@ -346,35 +346,93 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                         
                         {gradingTab === 'wheels' && (
                             <div className="space-y-6">
-                                <div className="grid grid-cols-3 gap-2">
-                                    <ColorWheel 
-                                        label="Shadows"
-                                        hue={values.colorGrading.shadows.hue}
-                                        saturation={values.colorGrading.shadows.saturation}
-                                        luminance={values.colorGrading.shadows.luminance}
-                                        onChange={(v) => handleColorGradeChange('shadows', v)}
-                                        onCommit={onCommit}
-                                    />
-                                    <ColorWheel 
-                                        label="Midtones"
-                                        hue={values.colorGrading.midtones.hue}
-                                        saturation={values.colorGrading.midtones.saturation}
-                                        luminance={values.colorGrading.midtones.luminance}
-                                        onChange={(v) => handleColorGradeChange('midtones', v)}
-                                        onCommit={onCommit}
-                                    />
-                                    <ColorWheel 
-                                        label="Highlights"
-                                        hue={values.colorGrading.highlights.hue}
-                                        saturation={values.colorGrading.highlights.saturation}
-                                        luminance={values.colorGrading.highlights.luminance}
-                                        onChange={(v) => handleColorGradeChange('highlights', v)}
-                                        onCommit={onCommit}
-                                    />
+                                {/* View Toggles (All vs Single) */}
+                                <div className="flex justify-end gap-2 mb-2">
+                                    <button 
+                                        onClick={() => setWheelsView('all')}
+                                        className={`p-1.5 rounded transition-all ${wheelsView === 'all' ? 'bg-zinc-800 text-white' : 'text-zinc-600 hover:text-zinc-300'}`}
+                                        title="All Wheels"
+                                    >
+                                        <Icon component={SquaresFour} size={16} />
+                                    </button>
+                                    <button 
+                                        onClick={() => setWheelsView('single')}
+                                        className={`p-1.5 rounded transition-all ${wheelsView === 'single' ? 'bg-zinc-800 text-white' : 'text-zinc-600 hover:text-zinc-300'}`}
+                                        title="Single Focus"
+                                    >
+                                        <Icon component={Square} size={16} />
+                                    </button>
                                 </div>
-                                <div className="space-y-4 pt-4 border-t border-white/5">
+
+                                {wheelsView === 'all' && (
+                                    <div className="flex flex-col gap-8">
+                                        <div className="bg-zinc-900/20 p-4 rounded-xl border border-white/5">
+                                            <ColorWheel 
+                                                label="Shadows"
+                                                hue={values.colorGrading.shadows.hue}
+                                                saturation={values.colorGrading.shadows.saturation}
+                                                luminance={values.colorGrading.shadows.luminance}
+                                                onChange={(v) => handleColorGradeChange('shadows', v)}
+                                                onCommit={onCommit}
+                                            />
+                                        </div>
+                                        <div className="bg-zinc-900/20 p-4 rounded-xl border border-white/5">
+                                            <ColorWheel 
+                                                label="Midtones"
+                                                hue={values.colorGrading.midtones.hue}
+                                                saturation={values.colorGrading.midtones.saturation}
+                                                luminance={values.colorGrading.midtones.luminance}
+                                                onChange={(v) => handleColorGradeChange('midtones', v)}
+                                                onCommit={onCommit}
+                                            />
+                                        </div>
+                                        <div className="bg-zinc-900/20 p-4 rounded-xl border border-white/5">
+                                            <ColorWheel 
+                                                label="Highlights"
+                                                hue={values.colorGrading.highlights.hue}
+                                                saturation={values.colorGrading.highlights.saturation}
+                                                luminance={values.colorGrading.highlights.luminance}
+                                                onChange={(v) => handleColorGradeChange('highlights', v)}
+                                                onCommit={onCommit}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {wheelsView === 'single' && (
+                                    <div className="space-y-4">
+                                        {/* Target Switcher */}
+                                        <div className="flex p-1 bg-zinc-900 rounded-lg">
+                                            {(['shadows', 'midtones', 'highlights'] as const).map(t => (
+                                                <button
+                                                    key={t}
+                                                    onClick={() => setSingleWheelTarget(t)}
+                                                    className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${singleWheelTarget === t ? 'bg-zinc-700 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                                >
+                                                    {t}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        
+                                        <div className="py-4 bg-zinc-900/20 rounded-xl border border-white/5 flex justify-center">
+                                            <ColorWheel 
+                                                label={singleWheelTarget}
+                                                hue={values.colorGrading[singleWheelTarget].hue}
+                                                saturation={values.colorGrading[singleWheelTarget].saturation}
+                                                luminance={values.colorGrading[singleWheelTarget].luminance}
+                                                onChange={(v) => handleColorGradeChange(singleWheelTarget, v)}
+                                                onCommit={onCommit}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                                
+                                <div className="w-full h-px bg-white/5 mt-4" />
+
+                                {/* Shared Controls */}
+                                <div className="space-y-5 px-1 pt-4">
                                     <Slider label="Blending" value={values.colorGrading.blending} min={0} max={100} onChange={(v) => handleGlobalGradeChange('blending', v)} onCommit={onCommit} />
-                                    <Slider label="Balance" value={values.colorGrading.balance} min={-100} max={100} onChange={(v) => handleGlobalGradeChange('balance', v)} onCommit={onCommit} />
+                                    <Slider label="Balance" value={values.colorGrading.balance} min={-100} max={100} onChange={(v) => handleGlobalGradeChange('balance', v)} onCommit={onCommit} centered />
                                 </div>
                             </div>
                         )}
@@ -505,14 +563,14 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
 
                 {/* Curves Tab */}
                 {activeTab === 'curves' && (
-                     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
+                     <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
                          <Curves curves={values.curves} onChange={(c, commit) => onChange('curves', c, commit)} onCommit={onCommit} />
                      </motion.div>
                 )}
 
                 {/* Detail Tab */}
                 {activeTab === 'detail' && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                    <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
                         <div className="space-y-4">
                             <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-4">Presence</h3>
                             <Slider label="Texture" value={values.texture} min={-1} max={1} onChange={(v) => onChange('texture', v)} onCommit={onCommit} />
@@ -535,7 +593,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
 
                 {/* Effects Tab */}
                 {activeTab === 'effects' && (
-                     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                     <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
                         <div className="space-y-4">
                             <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-4">Vignette</h3>
                             <Slider label="Amount" value={values.vignette} min={0} max={1} onChange={(v) => onChange('vignette', v)} onCommit={onCommit} />
@@ -557,9 +615,9 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                      </motion.div>
                 )}
                 
-                {/* Geometry Tab */}
+                {/* Geometry/Optics Tab */}
                 {activeTab === 'geometry' && (
-                     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                     <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
                          <div className="space-y-4">
                              <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-4">Lens Corrections</h3>
                              <Slider label="Distortion" value={values.distortion} min={-100} max={100} onChange={(v) => onChange('distortion', v)} onCommit={onCommit} />
@@ -569,52 +627,26 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
                              </div>
                              <Slider label="Chromatic Abb." value={values.chromaticAberration} min={0} max={100} onChange={(v) => onChange('chromaticAberration', v)} onCommit={onCommit} />
                          </div>
-                         
-                         <div className="w-full h-px bg-white/5" />
-                         
-                         {/* Transform Upright Controls */}
-                         <div className="space-y-4">
-                             <div className="flex justify-between items-center mb-1">
-                                <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Transform</h3>
-                                <button 
-                                    onClick={handleResetTransform}
-                                    className="text-[10px] text-zinc-500 hover:text-zinc-300"
-                                >
-                                    Reset
-                                </button>
-                             </div>
-                             
-                             <div className="bg-zinc-900 rounded-lg p-1 grid grid-cols-3 gap-1">
-                                 <button onClick={handleResetTransform} className="py-2 text-[10px] font-bold uppercase rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white">Off</button>
-                                 <button className="py-2 text-[10px] font-bold uppercase rounded text-zinc-600 hover:text-zinc-400 cursor-not-allowed" title="Auto requires computer vision">Auto</button>
-                                 <button 
-                                    onClick={() => onToolChange(activeTool === 'guided-upright' ? 'move' : 'guided-upright')} 
-                                    className={`py-2 text-[10px] font-bold uppercase rounded transition-colors ${activeTool === 'guided-upright' ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'}`}
-                                 >
-                                     Guided
-                                 </button>
-                                 
-                                 <button className="py-2 text-[10px] font-bold uppercase rounded text-zinc-600 hover:text-zinc-400 cursor-not-allowed">Level</button>
-                                 <button className="py-2 text-[10px] font-bold uppercase rounded text-zinc-600 hover:text-zinc-400 cursor-not-allowed">Vertical</button>
-                                 <button className="py-2 text-[10px] font-bold uppercase rounded text-zinc-600 hover:text-zinc-400 cursor-not-allowed">Full</button>
-                             </div>
 
-                             <div className="space-y-4 pt-2">
-                                 <Slider label="Vertical" value={values.transform.vertical} min={-100} max={100} onChange={(v) => onChange('transform', {...values.transform, vertical: v})} onCommit={onCommit} />
-                                 <Slider label="Horizontal" value={values.transform.horizontal} min={-100} max={100} onChange={(v) => onChange('transform', {...values.transform, horizontal: v})} onCommit={onCommit} />
-                                 <Slider label="Rotate" value={values.transform.rotate} min={-45} max={45} onChange={(v) => onChange('transform', {...values.transform, rotate: v})} onCommit={onCommit} />
-                                 <Slider label="Aspect" value={values.transform.aspect} min={-100} max={100} onChange={(v) => onChange('transform', {...values.transform, aspect: v})} onCommit={onCommit} />
-                                 <Slider label="Scale" value={values.transform.scale} min={50} max={200} onChange={(v) => onChange('transform', {...values.transform, scale: v})} onCommit={onCommit} />
-                                 <Slider label="X Offset" value={values.transform.xOffset} min={-100} max={100} onChange={(v) => onChange('transform', {...values.transform, xOffset: v})} onCommit={onCommit} />
-                                 <Slider label="Y Offset" value={values.transform.yOffset} min={-100} max={100} onChange={(v) => onChange('transform', {...values.transform, yOffset: v})} onCommit={onCommit} />
-                             </div>
+                         <div className="w-full h-px bg-white/5" />
+
+                         <div className="space-y-4">
+                             <h3 className="text-[10px] font-bold text-purple-400 uppercase tracking-widest mb-4">Defringe Purple</h3>
+                             <Slider label="Amount" value={defringe.purpleAmount} min={0} max={100} onChange={(v) => onChange('defringe', { ...defringe, purpleAmount: v })} onCommit={onCommit} />
+                             <Slider label="Hue Offset" value={defringe.purpleHueOffset} min={-30} max={30} onChange={(v) => onChange('defringe', { ...defringe, purpleHueOffset: v })} onCommit={onCommit} />
+                         </div>
+
+                         <div className="space-y-4">
+                             <h3 className="text-[10px] font-bold text-green-400 uppercase tracking-widest mb-4">Defringe Green</h3>
+                             <Slider label="Amount" value={defringe.greenAmount} min={0} max={100} onChange={(v) => onChange('defringe', { ...defringe, greenAmount: v })} onCommit={onCommit} />
+                             <Slider label="Hue Offset" value={defringe.greenHueOffset} min={-30} max={30} onChange={(v) => onChange('defringe', { ...defringe, greenHueOffset: v })} onCommit={onCommit} />
                          </div>
                      </motion.div>
                 )}
 
                 {/* Calibration Tab */}
                 {activeTab === 'calibration' && (
-                     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                     <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
                          <div className="space-y-4">
                              <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-4">Shadows</h3>
                              <Slider label="Tint" value={values.calibration.shadowTint} min={-100} max={100} onChange={(v) => onChange('calibration', { ...values.calibration, shadowTint: v })} onCommit={onCommit} trackGradient="linear-gradient(to right, #22c55e, #ffffff, #ec4899)" />
@@ -640,7 +672,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
 
                 {/* Presets Tab */}
                 {activeTab === 'presets' && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
+                    <motion.div initial={{ opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }} className="space-y-6">
                         {/* LUTs */}
                         <div className="space-y-3 pb-6 border-b border-white/5">
                             <h3 className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">LUT</h3>

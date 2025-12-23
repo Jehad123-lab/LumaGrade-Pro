@@ -13,50 +13,38 @@ export interface GradingParams {
   tint: number;
   
   // Presence (Detail)
-  texture: number; // -1 to 1 (High freq detail)
-  clarity: number; // -1 to 1 (Mid freq contrast)
-  dehaze: number;  // -1 to 1
+  texture: number;
+  clarity: number;
+  dehaze: number;
   
-  // Detail (New)
+  // Detail
   detail: {
-      denoise: number; // 0-100
+      denoise: number;
       sharpening: {
-          amount: number; // 0-150
-          radius: number; // 0.5-3.0
-          detail: number; // 0-100
-          masking: number; // 0-100
+          amount: number;
+          radius: number;
+          detail: number;
+          masking: number;
       };
   };
 
-  // Effects (Optics)
+  // Effects
   vignette: number;
   vignetteMidpoint: number;
   vignetteRoundness: number;
   vignetteFeather: number;
-  distortion: number; // -100 to 100
-  distortionCrop: boolean; // Constrain Crop
-  chromaticAberration: number; // 0 to 100
+  distortion: number;
+  distortionCrop: boolean;
+  chromaticAberration: number;
   
   // Defringe
   defringe: {
-      purpleAmount: number; // 0-100
-      purpleHueOffset: number; // -30 to 30
-      greenAmount: number; // 0-100
-      greenHueOffset: number; // -30 to 30
+      purpleAmount: number;
+      purpleHueOffset: number;
+      greenAmount: number;
+      greenHueOffset: number;
   };
   
-  // Transform (Geometry)
-  transform: {
-      vertical: number; // -100 to 100
-      horizontal: number; // -100 to 100
-      rotate: number; // -10 to 10
-      aspect: number; // -100 to 100
-      scale: number; // 0 to 200 (100 is default)
-      xOffset: number; // -100 to 100
-      yOffset: number; // -100 to 100
-      guides: GuideLine[]; // User drawn guides
-  };
-
   grain: number;
   grainSize: number;
   grainRoughness: number;
@@ -64,75 +52,47 @@ export interface GradingParams {
   halation: number;
 
   toneMapping: 'standard' | 'filmic' | 'agx' | 'soft' | 'neutral';
-  toneStrength: number; // 0.0 to 1.0
+  toneStrength: number;
   curves: Curves;
   colorGrading: {
     shadows: { hue: number; saturation: number; luminance: number };
     midtones: { hue: number; saturation: number; luminance: number };
     highlights: { hue: number; saturation: number; luminance: number };
-    blending: number; // 0-100 (Overlap)
-    balance: number;  // -100 to 100 (Shift)
+    blending: number;
+    balance: number;
   };
   colorMixer: ColorMixerState;
-  
-  // Multi-Point Color System
   pointColor: PointColorState;
   
-  // Camera Calibration
   calibration: {
-      shadowTint: number; // -100 to 100
+      shadowTint: number;
       red: { hue: number; saturation: number };
       green: { hue: number; saturation: number };
       blue: { hue: number; saturation: number };
   };
 
-  // New Pro Features
-  lutStr: string | null; // Raw content of the .cube file
+  lutStr: string | null;
   lutName: string | null;
   lutIntensity: number;
   
   comparisonMode: 'off' | 'split' | 'toggle';
-  splitPosition: number; // 0.0 to 1.0
-}
-
-export interface GuideLine {
-    id: string;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-    // Computed based on angle, but can be manually set if we have a UI for it
-    type: 'vertical' | 'horizontal'; 
+  splitPosition: number;
+  falseColor: boolean;
 }
 
 export interface PointColorData {
     id: string;
     active: boolean;
-    
-    // Source Color
-    srcHue: number; // 0-360
-    srcSat: number; // 0-100
-    srcLum: number; // 0-100
-    
-    // Shifts
-    hueShift: number; // -180 to 180
-    satShift: number; // -100 to 100
-    lumShift: number; // -100 to 100
-    
-    // Isolation Controls
-    hueRange: number; // 0-100
-    satRange: number; // 0-100
-    lumRange: number; // 0-100
-    
-    hueFalloff: number; // 0-100
-    satFalloff: number; // 0-100
-    lumFalloff: number; // 0-100
+    srcHue: number; srcSat: number; srcLum: number;
+    hueShift: number; satShift: number; lumShift: number;
+    hueRange: number; satRange: number; lumRange: number;
+    hueFalloff: number; satFalloff: number; lumFalloff: number;
 }
 
 export interface PointColorState {
-    showMask: boolean; // Global mask toggle
-    activePointIndex: number; // Currently selected index
-    points: PointColorData[]; // Array of 8 points
+    showMask: boolean;
+    activePointIndex: number;
+    points: PointColorData[];
 }
 
 export interface ColorMixerChannel {
@@ -184,13 +144,12 @@ export interface MediaState {
   thumbnail?: string; 
 }
 
-export interface SamplerPoint {
-  id: string;
-  x: number; // UV coordinate 0-1
-  y: number; // UV coordinate 0-1
+export interface WebGLCanvasRef {
+    exportImage: (filename: string) => void;
+    exportVideo: (filename: string, onProgress: (p: number) => void, onComplete: () => void) => void;
 }
 
-export type ToolType = 'move' | 'sampler' | 'point-picker' | 'guided-upright';
+export type ToolType = 'move' | 'sampler' | 'point-picker';
 
 export type WindowId = 'canvas' | 'controls' | 'timeline' | 'info' | 'shortcuts';
 
@@ -232,24 +191,13 @@ export const DefaultGradingParams: GradingParams = {
   brightness: 0,
   temperature: 0,
   tint: 0,
-  
-  // Presence
   texture: 0,
   clarity: 0,
   dehaze: 0,
-
-  // Detail
   detail: {
       denoise: 0,
-      sharpening: {
-          amount: 40,
-          radius: 1.0,
-          detail: 25,
-          masking: 0
-      }
+      sharpening: { amount: 40, radius: 1.0, detail: 25, masking: 0 }
   },
-
-  // Effects Defaults
   vignette: 0,
   vignetteMidpoint: 0.5,
   vignetteRoundness: 0,
@@ -257,33 +205,11 @@ export const DefaultGradingParams: GradingParams = {
   distortion: 0,
   distortionCrop: false, 
   chromaticAberration: 0,
-  
-  // New
-  defringe: {
-      purpleAmount: 0,
-      purpleHueOffset: 0,
-      greenAmount: 0,
-      greenHueOffset: 0
-  },
-  
-  // Transform Defaults
-  transform: {
-      vertical: 0,
-      horizontal: 0,
-      rotate: 0,
-      aspect: 0,
-      scale: 100,
-      xOffset: 0,
-      yOffset: 0,
-      guides: []
-  },
-
+  defringe: { purpleAmount: 0, purpleHueOffset: 0, greenAmount: 0, greenHueOffset: 0 },
   grain: 0,
   grainSize: 1.0,
   grainRoughness: 0.5,
-  
   halation: 0,
-
   toneMapping: 'standard',
   toneStrength: 1.0,
   curves: DefaultCurves,
@@ -295,26 +221,19 @@ export const DefaultGradingParams: GradingParams = {
     balance: 0
   },
   colorMixer: DefaultColorMixer,
-  
-  pointColor: {
-      showMask: false,
-      activePointIndex: -1,
-      points: [] 
-  },
-  
+  pointColor: { showMask: false, activePointIndex: -1, points: [] },
   calibration: {
       shadowTint: 0,
       red: { hue: 0, saturation: 0 },
       green: { hue: 0, saturation: 0 },
       blue: { hue: 0, saturation: 0 }
   },
-
-  // New
   lutStr: null,
   lutName: null,
   lutIntensity: 1.0,
   comparisonMode: 'off',
-  splitPosition: 0.5
+  splitPosition: 0.5,
+  falseColor: false
 };
 
 export const DefaultPresets: Preset[] = [
